@@ -4,7 +4,7 @@
 # for more details.
 #
 
-UIMAGE_LOADADDR = 0xd0001000
+UIMAGE_LOADADDR = $(CONFIG_KERNEL_LOAD_ADDRESS)
 UIMAGE_COMPRESSION = gzip
 
 $(obj)/../uImage: vmlinux.bin.gz FORCE

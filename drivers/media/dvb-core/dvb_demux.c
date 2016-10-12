@@ -130,7 +130,7 @@ static inline int dvb_dmx_swfilter_payload(struct dvb_demux_feed *feed,
 
 	feed->peslen += count;
 
-	return feed->cb.ts(&buf[p], count, NULL, 0, &feed->feed.ts, DMX_OK);
+	return feed->cb.ts(&buf[p], count, NULL, 0, &feed->feed.ts);
 }
 
 static int dvb_dmx_swfilter_sectionfilter(struct dvb_demux_feed *feed,
@@ -152,7 +152,7 @@ static int dvb_dmx_swfilter_sectionfilter(struct dvb_demux_feed *feed,
 		return 0;
 
 	return feed->cb.sec(feed->feed.sec.secbuf, feed->feed.sec.seclen,
-			    NULL, 0, &f->filter, DMX_OK);
+			    NULL, 0, &f->filter);
 }
 
 static inline int dvb_dmx_swfilter_section_feed(struct dvb_demux_feed *feed)
@@ -367,8 +367,7 @@ static inline void dvb_dmx_swfilter_packet_type(struct dvb_demux_feed *feed,
 			if (feed->ts_type & TS_PAYLOAD_ONLY)
 				dvb_dmx_swfilter_payload(feed, buf);
 			else
-				feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts,
-					    DMX_OK);
+				feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts);
 		}
 		if (feed->ts_type & TS_DECODER)
 			if (feed->demux->write_to_decoder)
@@ -399,28 +398,23 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 	int dvr_done = 0;
 
 	if (dvb_demux_speedcheck) {
-		struct timespec cur_time, delta_time;
+		ktime_t cur_time;
 		u64 speed_bytes, speed_timedelta;
 
 		demux->speed_pkts_cnt++;
 
 		/* show speed every SPEED_PKTS_INTERVAL packets */
 		if (!(demux->speed_pkts_cnt % SPEED_PKTS_INTERVAL)) {
-			cur_time = current_kernel_time();
+			cur_time = ktime_get();
 
-			if (demux->speed_last_time.tv_sec != 0 &&
-					demux->speed_last_time.tv_nsec != 0) {
-				delta_time = timespec_sub(cur_time,
-						demux->speed_last_time);
+			if (ktime_to_ns(demux->speed_last_time) != 0) {
 				speed_bytes = (u64)demux->speed_pkts_cnt
 					* 188 * 8;
 				/* convert to 1024 basis */
 				speed_bytes = 1000 * div64_u64(speed_bytes,
 						1024);
-				speed_timedelta =
-					(u64)timespec_to_ns(&delta_time);
-				speed_timedelta = div64_u64(speed_timedelta,
-						1000000); /* nsec -> usec */
+				speed_timedelta = ktime_ms_delta(cur_time,
+							demux->speed_last_time);
 				printk(KERN_INFO "TS speed %llu Kbits/sec \n",
 						div64_u64(speed_bytes,
 							speed_timedelta));
@@ -435,25 +429,27 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 		dprintk_tscheck("TEI detected. "
 				"PID=0x%x data1=0x%x\n",
 				pid, buf[1]);
-		/* data in this packet cant be trusted - drop it unless
+		/* data in this packet can't be trusted - drop it unless
 		 * module option dvb_demux_feed_err_pkts is set */
 		if (!dvb_demux_feed_err_pkts)
 			return;
 	} else /* if TEI bit is set, pid may be wrong- skip pkt counter */
-	if (demux->cnt_storage && dvb_demux_tscheck) {
-		/* check pkt counter */
-		if (pid < MAX_PID) {
-			if ((buf[3] & 0xf) != demux->cnt_storage[pid])
-				dprintk_tscheck("TS packet counter mismatch. "
-						"PID=0x%x expected 0x%x "
-						"got 0x%x\n",
+		if (demux->cnt_storage && dvb_demux_tscheck) {
+			/* check pkt counter */
+			if (pid < MAX_PID) {
+				if (buf[3] & 0x10)
+					demux->cnt_storage[pid] =
+						(demux->cnt_storage[pid] + 1) & 0xf;
+
+				if ((buf[3] & 0xf) != demux->cnt_storage[pid]) {
+					dprintk_tscheck("TS packet counter mismatch. PID=0x%x expected 0x%x got 0x%x\n",
 						pid, demux->cnt_storage[pid],
 						buf[3] & 0xf);
-
-			demux->cnt_storage[pid] = ((buf[3] & 0xf) + 1)&0xf;
+					demux->cnt_storage[pid] = buf[3] & 0xf;
+				}
+			}
+			/* end check */
 		}
-		/* end check */
-	}
 
 	list_for_each_entry(feed, &demux->feed_list, list_head) {
 		if ((feed->pid != pid) && (feed->pid != 0x2000))
@@ -467,14 +463,16 @@ static void dvb_dmx_swfilter_packet(struct dvb_demux *demux, const u8 *buf)
 		if (feed->pid == pid)
 			dvb_dmx_swfilter_packet_type(feed, buf);
 		else if (feed->pid == 0x2000)
-			feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts, DMX_OK);
+			feed->cb.ts(buf, 188, NULL, 0, &feed->feed.ts);
 	}
 }
 
 void dvb_dmx_swfilter_packets(struct dvb_demux *demux, const u8 *buf,
 			      size_t count)
 {
-	spin_lock(&demux->lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&demux->lock, flags);
 
 	while (count--) {
 		if (buf[0] == 0x47)
@@ -482,7 +480,7 @@ void dvb_dmx_swfilter_packets(struct dvb_demux *demux, const u8 *buf,
 		buf += 188;
 	}
 
-	spin_unlock(&demux->lock);
+	spin_unlock_irqrestore(&demux->lock, flags);
 }
 
 EXPORT_SYMBOL(dvb_dmx_swfilter_packets);
@@ -517,8 +515,9 @@ static inline void _dvb_dmx_swfilter(struct dvb_demux *demux, const u8 *buf,
 {
 	int p = 0, i, j;
 	const u8 *q;
+	unsigned long flags;
 
-	spin_lock(&demux->lock);
+	spin_lock_irqsave(&demux->lock, flags);
 
 	if (demux->tsbufp) { /* tsbuf[0] is now 0x47. */
 		i = demux->tsbufp;
@@ -562,7 +561,7 @@ static inline void _dvb_dmx_swfilter(struct dvb_demux *demux, const u8 *buf,
 	}
 
 bailout:
-	spin_unlock(&demux->lock);
+	spin_unlock_irqrestore(&demux->lock, flags);
 }
 
 void dvb_dmx_swfilter(struct dvb_demux *demux, const u8 *buf, size_t count)
@@ -579,11 +578,13 @@ EXPORT_SYMBOL(dvb_dmx_swfilter_204);
 
 void dvb_dmx_swfilter_raw(struct dvb_demux *demux, const u8 *buf, size_t count)
 {
-	spin_lock(&demux->lock);
+	unsigned long flags;
 
-	demux->feed->cb.ts(buf, count, NULL, 0, &demux->feed->feed.ts, DMX_OK);
+	spin_lock_irqsave(&demux->lock, flags);
 
-	spin_unlock(&demux->lock);
+	demux->feed->cb.ts(buf, count, NULL, 0, &demux->feed->feed.ts);
+
+	spin_unlock_irqrestore(&demux->lock, flags);
 }
 EXPORT_SYMBOL(dvb_dmx_swfilter_raw);
 
@@ -660,7 +661,7 @@ out:
 
 static int dmx_ts_feed_set(struct dmx_ts_feed *ts_feed, u16 pid, int ts_type,
 			   enum dmx_ts_pes pes_type,
-			   size_t circular_buffer_size, struct timespec timeout)
+			   size_t circular_buffer_size, ktime_t timeout)
 {
 	struct dvb_demux_feed *feed = (struct dvb_demux_feed *)ts_feed;
 	struct dvb_demux *demux = feed->demux;
@@ -672,7 +673,7 @@ static int dmx_ts_feed_set(struct dmx_ts_feed *ts_feed, u16 pid, int ts_type,
 		return -ERESTARTSYS;
 
 	if (ts_type & TS_DECODER) {
-		if (pes_type >= DMX_TS_PES_OTHER) {
+		if (pes_type >= DMX_PES_OTHER) {
 			mutex_unlock(&demux->mutex);
 			return -EINVAL;
 		}
@@ -844,7 +845,7 @@ static int dvbdmx_release_ts_feed(struct dmx_demux *dmx,
 
 	feed->pid = 0xffff;
 
-	if (feed->ts_type & TS_DECODER && feed->pes_type < DMX_TS_PES_OTHER)
+	if (feed->ts_type & TS_DECODER && feed->pes_type < DMX_PES_OTHER)
 		demux->pesfilter[feed->pes_type] = NULL;
 
 	mutex_unlock(&demux->mutex);
@@ -1025,8 +1026,13 @@ static int dmx_section_feed_release_filter(struct dmx_section_feed *feed,
 		return -EINVAL;
 	}
 
-	if (feed->is_filtering)
+	if (feed->is_filtering) {
+		/* release dvbdmx->mutex as far as it is
+		   acquired by stop_filtering() itself */
+		mutex_unlock(&dvbdmx->mutex);
 		feed->stop_filtering(feed);
+		mutex_lock(&dvbdmx->mutex);
+	}
 
 	spin_lock_irq(&dvbdmx->lock);
 	f = dvbdmxfeed->filter;
@@ -1266,7 +1272,7 @@ int dvb_dmx_init(struct dvb_demux *dvbdemux)
 
 	INIT_LIST_HEAD(&dvbdemux->frontend_list);
 
-	for (i = 0; i < DMX_TS_PES_OTHER; i++) {
+	for (i = 0; i < DMX_PES_OTHER; i++) {
 		dvbdemux->pesfilter[i] = NULL;
 		dvbdemux->pids[i] = 0xffff;
 	}

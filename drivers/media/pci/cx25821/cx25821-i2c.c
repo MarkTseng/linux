@@ -23,8 +23,9 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include "cx25821.h"
+#include <linux/module.h>
 #include <linux/i2c.h>
+#include "cx25821.h"
 
 static unsigned int i2c_debug;
 module_param(i2c_debug, int, 0644);
@@ -280,7 +281,7 @@ static u32 cx25821_functionality(struct i2c_adapter *adap)
 		I2C_FUNC_SMBUS_READ_WORD_DATA | I2C_FUNC_SMBUS_WRITE_WORD_DATA;
 }
 
-static struct i2c_algorithm cx25821_i2c_algo_template = {
+static const struct i2c_algorithm cx25821_i2c_algo_template = {
 	.master_xfer = i2c_xfer,
 	.functionality = cx25821_functionality,
 #ifdef NEED_ALGO_CONTROL

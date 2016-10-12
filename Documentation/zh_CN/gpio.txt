@@ -84,10 +84,10 @@ GPIO 公约
 控制器的抽象函数来实现它。(有一些可选的代码能支持这种策略的实现,本文档
 后面会介绍，但作为 GPIO 接口的客户端驱动程序必须与它的实现无关。)
 
-也就是说,如果在他们的平台上支持这个公约，驱动应尽可能的使用它。平台
-必须在 Kconfig 中声明对 GENERIC_GPIO的支持 (布尔型 true)，并提供
-一个 <asm/gpio.h> 文件。那些调用标准 GPIO 函数的驱动应该在 Kconfig
-入口中声明依赖GENERIC_GPIO。当驱动包含文件:
+也就是说,如果在他们的平台上支持这个公约，驱动应尽可能的使用它。同时，平台
+必须在 Kconfig 中选择 ARCH_REQUIRE_GPIOLIB 或者 ARCH_WANT_OPTIONAL_GPIOLIB
+选项。那些调用标准 GPIO 函数的驱动应该在 Kconfig 入口中声明依赖GENERIC_GPIO。
+当驱动包含文件:
 
 	#include <linux/gpio.h>
 
@@ -638,9 +638,6 @@ GPIO 控制器的路径类似 /sys/class/gpio/gpiochip42/ (对于从#42 GPIO
 	int gpio_export_link(struct device *dev, const char *name,
 		unsigned gpio)
 
-	/* 改变 sysfs 中的一个 GPIO 节点的极性 */
-	int gpio_sysfs_set_active_low(unsigned gpio, int value);
-
 在一个内核驱动申请一个 GPIO 之后，它可以通过 gpio_export()使其在 sysfs
 接口中可见。该驱动可以控制信号方向是否可修改。这有助于防止用户空间代码无意间
 破坏重要的系统状态。
@@ -651,8 +648,3 @@ GPIO 控制器的路径类似 /sys/class/gpio/gpiochip42/ (对于从#42 GPIO
 在 GPIO 被导出之后，gpio_export_link()允许在 sysfs 文件系统的任何地方
 创建一个到这个 GPIO sysfs 节点的符号链接。这样驱动就可以通过一个描述性的
 名字，在 sysfs 中他们所拥有的设备下提供一个(到这个 GPIO sysfs 节点的)接口。
-
-驱动可以使用 gpio_sysfs_set_active_low() 来在用户空间隐藏电路板之间
-GPIO 线的极性差异。这个仅对 sysfs 接口起作用。极性的改变可以在 gpio_export()
-前后进行,且之前使能的轮询操作(poll(2))支持(上升或下降沿)将会被重新配置来遵循
-这个设置。

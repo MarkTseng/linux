@@ -21,8 +21,6 @@
 #include <linux/hid-debug.h>
 #include <linux/input.h>
 #include "hid-ids.h"
-#include "usbhid/usbhid.h"
-#include <linux/usb.h>
 
 #include <linux/fb.h>
 #include <linux/vmalloc.h>
@@ -55,7 +53,7 @@ void picolcd_leds_set(struct picolcd_data *data)
 	spin_lock_irqsave(&data->lock, flags);
 	hid_set_field(report->field[0], 0, data->led_state);
 	if (!(data->status & PICOLCD_FAILED))
-		usbhid_submit_report(data->hdev, report, USB_DIR_OUT);
+		hid_hw_request(data->hdev, report, HID_REQ_SET_REPORT);
 	spin_unlock_irqrestore(&data->lock, flags);
 }
 
@@ -68,7 +66,7 @@ static void picolcd_led_set_brightness(struct led_classdev *led_cdev,
 	int i, state = 0;
 
 	dev  = led_cdev->dev->parent;
-	hdev = container_of(dev, struct hid_device, dev);
+	hdev = to_hid_device(dev);
 	data = hid_get_drvdata(hdev);
 	if (!data)
 		return;
@@ -95,7 +93,7 @@ static enum led_brightness picolcd_led_get_brightness(struct led_classdev *led_c
 	int i, value = 0;
 
 	dev  = led_cdev->dev->parent;
-	hdev = container_of(dev, struct hid_device, dev);
+	hdev = to_hid_device(dev);
 	data = hid_get_drvdata(hdev);
 	for (i = 0; i < 8; i++)
 		if (led_cdev == data->led[i]) {

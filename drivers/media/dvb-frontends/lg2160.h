@@ -56,18 +56,17 @@ struct lg2160_config {
 	u16 if_khz;
 
 	/* disable i2c repeater - 0:repeater enabled 1:repeater disabled */
-	int deny_i2c_rptr:1;
+	unsigned int deny_i2c_rptr:1;
 
 	/* spectral inversion - 0:disabled 1:enabled */
-	int spectral_inversion:1;
+	unsigned int spectral_inversion:1;
 
 	unsigned int output_if;
 	enum lg2160_spi_clock spi_clock;
 	enum lg_chip_type lg_chip;
 };
 
-#if defined(CONFIG_DVB_LG2160) || (defined(CONFIG_DVB_LG2160_MODULE) && \
-				     defined(MODULE))
+#if IS_REACHABLE(CONFIG_DVB_LG2160)
 extern
 struct dvb_frontend *lg2160_attach(const struct lg2160_config *config,
 				     struct i2c_adapter *i2c_adap);

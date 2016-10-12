@@ -13,7 +13,6 @@
 #include <linux/mbus.h>
 #include <linux/io.h>
 #include <linux/gpio.h>
-#include <mach/hardware.h>
 #include <plat/orion-gpio.h>
 #include <plat/mpp.h>
 
@@ -49,7 +48,7 @@ void __init orion_mpp_conf(unsigned int *mpp_list, unsigned int variant_mask,
 					"number (%u)\n", num);
 			continue;
 		}
-		if (variant_mask & !(*mpp_list & variant_mask)) {
+		if (variant_mask && !(*mpp_list & variant_mask)) {
 			printk(KERN_WARNING
 			       "orion_mpp_conf: requested MPP%u config "
 			       "unavailable on this hardware\n", num);

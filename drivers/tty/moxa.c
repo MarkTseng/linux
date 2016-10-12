@@ -155,7 +155,6 @@ struct mon_str {
 #define LOWWAIT 	2
 #define EMPTYWAIT	3
 
-#define SERIAL_DO_RESTART
 
 #define WAKEUP_CHARS		256
 
@@ -913,20 +912,16 @@ static void moxa_board_deinit(struct moxa_board_conf *brd)
 
 	/* pci hot-un-plug support */
 	for (a = 0; a < brd->numPorts; a++)
-		if (brd->ports[a].port.flags & ASYNC_INITIALIZED) {
-			struct tty_struct *tty = tty_port_tty_get(
-						&brd->ports[a].port);
-			if (tty) {
-				tty_hangup(tty);
-				tty_kref_put(tty);
-			}
-		}
+		if (tty_port_initialized(&brd->ports[a].port))
+			tty_port_tty_hangup(&brd->ports[a].port, false);
+
 	for (a = 0; a < MAX_PORTS_PER_BOARD; a++)
 		tty_port_destroy(&brd->ports[a].port);
+
 	while (1) {
 		opened = 0;
 		for (a = 0; a < brd->numPorts; a++)
-			if (brd->ports[a].port.flags & ASYNC_INITIALIZED)
+			if (tty_port_initialized(&brd->ports[a].port))
 				opened++;
 		mutex_unlock(&moxa_openlock);
 		if (!opened)
@@ -1100,7 +1095,7 @@ static int __init moxa_init(void)
 				continue;
 			}
 
-			printk(KERN_INFO "MOXA isa board found at 0x%.8lu and "
+			printk(KERN_INFO "MOXA isa board found at 0x%.8lx and "
 					"ready (%u ports, firmware loaded)\n",
 					baseaddr[i], brd->numPorts);
 
@@ -1197,13 +1192,13 @@ static int moxa_open(struct tty_struct *tty, struct file *filp)
 	tty->driver_data = ch;
 	tty_port_tty_set(&ch->port, tty);
 	mutex_lock(&ch->port.mutex);
-	if (!(ch->port.flags & ASYNC_INITIALIZED)) {
+	if (!tty_port_initialized(&ch->port)) {
 		ch->statusflags = 0;
 		moxa_set_tty_param(tty, &tty->termios);
 		MoxaPortLineCtrl(ch, 1, 1);
 		MoxaPortEnable(ch);
 		MoxaSetFifo(ch, ch->type == PORT_16550A);
-		ch->port.flags |= ASYNC_INITIALIZED;
+		tty_port_set_initialized(&ch->port, 1);
 	}
 	mutex_unlock(&ch->port.mutex);
 	mutex_unlock(&moxa_openlock);
@@ -1365,7 +1360,6 @@ static void moxa_hangup(struct tty_struct *tty)
 
 static void moxa_new_dcdstate(struct moxa_port *p, u8 dcd)
 {
-	struct tty_struct *tty;
 	unsigned long flags;
 	dcd = !!dcd;
 
@@ -1373,10 +1367,8 @@ static void moxa_new_dcdstate(struct moxa_port *p, u8 dcd)
 	if (dcd != p->DCDState) {
         	p->DCDState = dcd;
         	spin_unlock_irqrestore(&p->port.lock, flags);
-		tty = tty_port_tty_get(&p->port);
-		if (tty && !C_CLOCAL(tty) && !dcd)
-			tty_hangup(tty);
-		tty_kref_put(tty);
+		if (!dcd)
+			tty_port_tty_hangup(&p->port, true);
 	}
 	else
 		spin_unlock_irqrestore(&p->port.lock, flags);
@@ -1387,7 +1379,7 @@ static int moxa_poll_port(struct moxa_port *p, unsigned int handle,
 {
 	struct tty_struct *tty = tty_port_tty_get(&p->port);
 	void __iomem *ofsAddr;
-	unsigned int inited = p->port.flags & ASYNC_INITIALIZED;
+	unsigned int inited = tty_port_initialized(&p->port);
 	u16 intr;
 
 	if (tty) {
@@ -1402,10 +1394,10 @@ static int moxa_poll_port(struct moxa_port *p, unsigned int handle,
 			tty_wakeup(tty);
 		}
 
-		if (inited && !test_bit(TTY_THROTTLED, &tty->flags) &&
+		if (inited && !tty_throttled(tty) &&
 				MoxaPortRxQueue(p) > 0) { /* RX */
 			MoxaPortReadData(p);
-			tty_schedule_flip(tty);
+			tty_schedule_flip(&p->port);
 		}
 	} else {
 		clear_bit(EMPTYWAIT, &p->statusflags);
@@ -1429,8 +1421,8 @@ static int moxa_poll_port(struct moxa_port *p, unsigned int handle,
 		goto put;
 
 	if (tty && (intr & IntrBreak) && !I_IGNBRK(tty)) { /* BREAK */
-		tty_insert_flip_char(tty, 0, TTY_BREAK);
-		tty_schedule_flip(tty);
+		tty_insert_flip_char(&p->port, 0, TTY_BREAK);
+		tty_schedule_flip(&p->port);
 	}
 
 	if (intr & IntrLine)
@@ -1966,7 +1958,7 @@ static int MoxaPortReadData(struct moxa_port *port)
 			ofs = baseAddr + DynPage_addr + bufhead + head;
 			len = (tail >= head) ? (tail - head) :
 					(rx_mask + 1 - head);
-			len = tty_prepare_flip_string(tty, &dst,
+			len = tty_prepare_flip_string(&port->port, &dst,
 					min(len, count));
 			memcpy_fromio(dst, ofs, len);
 			head = (head + len) & rx_mask;
@@ -1978,7 +1970,7 @@ static int MoxaPortReadData(struct moxa_port *port)
 		while (count > 0) {
 			writew(pageno, baseAddr + Control_reg);
 			ofs = baseAddr + DynPage_addr + pageofs;
-			len = tty_prepare_flip_string(tty, &dst,
+			len = tty_prepare_flip_string(&port->port, &dst,
 					min(Page_size - pageofs, count));
 			memcpy_fromio(dst, ofs, len);
 

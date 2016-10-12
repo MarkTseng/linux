@@ -209,7 +209,7 @@ static void cpia2_usb_complete(struct urb *urb)
 {
 	int i;
 	unsigned char *cdata;
-	static int frame_ready = false;
+	static bool frame_ready = false;
 	struct camera_data *cam = (struct camera_data *) urb->context;
 
 	if (urb->status!=0) {
@@ -328,7 +328,7 @@ static void cpia2_usb_complete(struct urb *urb)
 				continue;
 			}
 			DBG("Start of frame pattern found\n");
-			do_gettimeofday(&cam->workbuff->timestamp);
+			v4l2_get_timestamp(&cam->workbuff->timestamp);
 			cam->workbuff->seq = cam->frame_count++;
 			cam->workbuff->data[0] = 0xFF;
 			cam->workbuff->data[1] = 0xD8;
@@ -662,7 +662,6 @@ static int submit_urbs(struct camera_data *cam)
 		}
 		urb = usb_alloc_urb(FRAMES_PER_DESC, GFP_KERNEL);
 		if (!urb) {
-			ERR("%s: usb_alloc_urb error!\n", __func__);
 			for (j = 0; j < i; j++)
 				usb_free_urb(cam->sbuf[j].urb);
 			return -ENOMEM;
@@ -890,8 +889,7 @@ static void cpia2_usb_disconnect(struct usb_interface *intf)
 		DBG("Wakeup waiting processes\n");
 		cam->curbuff->status = FRAME_READY;
 		cam->curbuff->length = 0;
-		if (waitqueue_active(&cam->wq_stream))
-			wake_up_interruptible(&cam->wq_stream);
+		wake_up_interruptible(&cam->wq_stream);
 	}
 
 	DBG("Releasing interface\n");

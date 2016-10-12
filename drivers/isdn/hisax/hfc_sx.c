@@ -1159,7 +1159,8 @@ hfcsx_l2l1(struct PStack *st, int pr, void *arg)
 	case (PH_PULL | INDICATION):
 		spin_lock_irqsave(&bcs->cs->lock, flags);
 		if (bcs->tx_skb) {
-			printk(KERN_WARNING "hfc_l2l1: this shouldn't happen\n");
+			printk(KERN_WARNING "%s: this shouldn't happen\n",
+			       __func__);
 		} else {
 //				test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
 			bcs->tx_skb = skb;
@@ -1479,7 +1480,7 @@ int setup_hfcsx(struct IsdnCard *card)
 			release_region(cs->hw.hfcsx.base, 2);
 			return (0);
 		}
-		if (!(cs->hw.hfcsx.extra = (void *)
+		if (!(cs->hw.hfcsx.extra =
 		      kmalloc(sizeof(struct hfcsx_extra), GFP_ATOMIC))) {
 			release_region(cs->hw.hfcsx.base, 2);
 			printk(KERN_WARNING "HFC-SX: unable to allocate memory\n");

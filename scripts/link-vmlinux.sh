@@ -62,7 +62,7 @@ vmlinux_link()
 			-Wl,--start-group                                    \
 				 ${KBUILD_VMLINUX_MAIN}                      \
 			-Wl,--end-group                                      \
-			-lutil ${1}
+			-lutil -lrt -lpthread ${1}
 		rm -f linux
 	fi
 }
@@ -74,21 +74,29 @@ kallsyms()
 	info KSYM ${2}
 	local kallsymopt;
 
-	if [ -n "${CONFIG_SYMBOL_PREFIX}" ]; then
-		kallsymopt="${kallsymopt} \
-			    --symbol-prefix=${CONFIG_SYMBOL_PREFIX}"
+	if [ -n "${CONFIG_HAVE_UNDERSCORE_SYMBOL_PREFIX}" ]; then
+		kallsymopt="${kallsymopt} --symbol-prefix=_"
 	fi
 
 	if [ -n "${CONFIG_KALLSYMS_ALL}" ]; then
 		kallsymopt="${kallsymopt} --all-symbols"
 	fi
 
+	if [ -n "${CONFIG_KALLSYMS_ABSOLUTE_PERCPU}" ]; then
+		kallsymopt="${kallsymopt} --absolute-percpu"
+	fi
+
+	if [ -n "${CONFIG_KALLSYMS_BASE_RELATIVE}" ]; then
+		kallsymopt="${kallsymopt} --base-relative"
+	fi
+
 	local aflags="${KBUILD_AFLAGS} ${KBUILD_AFLAGS_KERNEL}               \
 		      ${NOSTDINC_FLAGS} ${LINUXINCLUDE} ${KBUILD_CPPFLAGS}"
 
-	${NM} -n ${1} | \
-		scripts/kallsyms ${kallsymopt} | \
-		${CC} ${aflags} -c -o ${2} -x assembler-with-cpp -
+	local afile="`basename ${2} .o`.S"
+
+	${NM} -n ${1} | scripts/kallsyms ${kallsymopt} > ${afile}
+	${CC} ${aflags} -c -o ${2} ${afile}
 }
 
 # Create map file with all symbols from ${1}
@@ -104,7 +112,6 @@ sortextable()
 }
 
 # Delete output files in case of error
-trap cleanup SIGHUP SIGINT SIGQUIT SIGTERM ERR
 cleanup()
 {
 	rm -f .old_version
@@ -116,6 +123,20 @@ cleanup()
 	rm -f vmlinux
 	rm -f vmlinux.o
 }
+
+on_exit()
+{
+	if [ $? -ne 0 ]; then
+		cleanup
+	fi
+}
+trap on_exit EXIT
+
+on_signals()
+{
+	exit 1
+}
+trap on_signals HUP INT QUIT TERM
 
 #
 #
@@ -132,7 +153,14 @@ if [ "$1" = "clean" ]; then
 fi
 
 # We need access to CONFIG_ symbols
-. ./.config
+case "${KCONFIG_CONFIG}" in
+*/*)
+	. "${KCONFIG_CONFIG}"
+	;;
+*)
+	# Force using a file from the current directory
+	. "./${KCONFIG_CONFIG}"
+esac
 
 #link vmlinux.o
 info LD vmlinux.o
@@ -152,7 +180,7 @@ else
 fi;
 
 # final build of init/
-${MAKE} -f "${srctree}/scripts/Makefile.build" obj=init
+${MAKE} -f "${srctree}/scripts/Makefile.build" obj=init GCC_PLUGINS_CFLAGS="${GCC_PLUGINS_CFLAGS}"
 
 kallsymso=""
 kallsyms_vmlinux=""
@@ -217,7 +245,6 @@ if [ -n "${CONFIG_KALLSYMS}" ]; then
 	if ! cmp -s System.map .tmp_System.map; then
 		echo >&2 Inconsistent kallsyms data
 		echo >&2 Try "make KALLSYMS_EXTRA_PASS=1" as a workaround
-		cleanup
 		exit 1
 	fi
 fi

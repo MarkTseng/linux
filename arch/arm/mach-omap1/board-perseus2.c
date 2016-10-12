@@ -30,7 +30,7 @@
 
 #include <mach/tc.h>
 #include <mach/mux.h>
-#include <mach/flash.h>
+#include "flash.h"
 
 #include <mach/hardware.h>
 
@@ -324,8 +324,9 @@ MACHINE_START(OMAP_PERSEUS2, "OMAP730 Perseus2")
 	.map_io		= omap_perseus2_map_io,
 	.init_early     = omap1_init_early,
 	.init_irq	= omap1_init_irq,
+	.handle_irq	= omap1_handle_irq,
 	.init_machine	= omap_perseus2_init,
 	.init_late	= omap1_init_late,
-	.timer		= &omap1_timer,
+	.init_time	= omap1_timer_init,
 	.restart	= omap1_restart,
 MACHINE_END

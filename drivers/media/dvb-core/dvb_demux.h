@@ -83,7 +83,7 @@ struct dvb_demux_feed {
 	u8 *buffer;
 	int buffer_size;
 
-	struct timespec timeout;
+	ktime_t timeout;
 	struct dvb_demux_filter *filter;
 
 	int ts_type;
@@ -119,8 +119,8 @@ struct dvb_demux {
 
 	struct list_head frontend_list;
 
-	struct dvb_demux_feed *pesfilter[DMX_TS_PES_OTHER];
-	u16 pids[DMX_TS_PES_OTHER];
+	struct dvb_demux_feed *pesfilter[DMX_PES_OTHER];
+	u16 pids[DMX_PES_OTHER];
 	int playing;
 	int recording;
 
@@ -134,7 +134,7 @@ struct dvb_demux {
 
 	uint8_t *cnt_storage; /* for TS continuity check */
 
-	struct timespec speed_last_time; /* for TS speed check */
+	ktime_t speed_last_time; /* for TS speed check */
 	uint32_t speed_pkts_cnt; /* for TS speed check */
 };
 

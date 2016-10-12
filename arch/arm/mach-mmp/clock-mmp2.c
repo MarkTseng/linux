@@ -4,8 +4,9 @@
 #include <linux/list.h>
 #include <linux/io.h>
 #include <linux/clk.h>
+#include <linux/clk/mmp.h>
 
-#include <mach/addr-map.h>
+#include "addr-map.h"
 
 #include "common.h"
 #include "clock.h"
@@ -98,14 +99,15 @@ static struct clk_lookup mmp2_clkregs[] = {
 	INIT_CLKREG(&clk_twsi5, "pxa2xx-i2c.4", NULL),
 	INIT_CLKREG(&clk_twsi6, "pxa2xx-i2c.5", NULL),
 	INIT_CLKREG(&clk_nand, "pxa3xx-nand", NULL),
-	INIT_CLKREG(&clk_gpio, "pxa-gpio", NULL),
+	INIT_CLKREG(&clk_gpio, "mmp2-gpio", NULL),
 	INIT_CLKREG(&clk_sdh0, "sdhci-pxav3.0", "PXA-SDHCLK"),
 	INIT_CLKREG(&clk_sdh1, "sdhci-pxav3.1", "PXA-SDHCLK"),
 	INIT_CLKREG(&clk_sdh2, "sdhci-pxav3.2", "PXA-SDHCLK"),
 	INIT_CLKREG(&clk_sdh3, "sdhci-pxav3.3", "PXA-SDHCLK"),
 };
 
-void __init mmp2_clk_init(void)
+void __init mmp2_clk_init(phys_addr_t mpmu_phys, phys_addr_t apmu_phys,
+			  phys_addr_t apbc_phys)
 {
 	clkdev_add_table(ARRAY_AND_SIZE(mmp2_clkregs));
 }

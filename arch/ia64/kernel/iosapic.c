@@ -76,7 +76,7 @@
  *	PCI pin -> global system interrupt (GSI) -> IA-64 vector <-> IRQ
  *
  * Note: The term "IRQ" is loosely used everywhere in Linux kernel to
- * describeinterrupts.  Now we use "IRQ" only for Linux IRQ's.  ISA IRQ
+ * describe interrupts.  Now we use "IRQ" only for Linux IRQ's.  ISA IRQ
  * (isa_irq) is the only exception in this source code.
  */
 
@@ -256,7 +256,7 @@ set_rte (unsigned int gsi, unsigned int irq, unsigned int dest, int mask)
 }
 
 static void
-nop (struct irq_data *data)
+iosapic_nop (struct irq_data *data)
 {
 	/* do nothing... */
 }
@@ -415,7 +415,7 @@ iosapic_unmask_level_irq (struct irq_data *data)
 #define iosapic_shutdown_level_irq	mask_irq
 #define iosapic_enable_level_irq	unmask_irq
 #define iosapic_disable_level_irq	mask_irq
-#define iosapic_ack_level_irq		nop
+#define iosapic_ack_level_irq		iosapic_nop
 
 static struct irq_chip irq_type_iosapic_level = {
 	.name =			"IO-SAPIC-level",
@@ -453,7 +453,7 @@ iosapic_ack_edge_irq (struct irq_data *data)
 }
 
 #define iosapic_enable_edge_irq		unmask_irq
-#define iosapic_disable_edge_irq	nop
+#define iosapic_disable_edge_irq	iosapic_nop
 
 static struct irq_chip irq_type_iosapic_edge = {
 	.name =			"IO-SAPIC-edge",
@@ -610,9 +610,9 @@ register_intr (unsigned int gsi, int irq, unsigned char delivery,
 			       chip->name, irq_type->name);
 		chip = irq_type;
 	}
-	__irq_set_chip_handler_name_locked(irq, chip, trigger == IOSAPIC_EDGE ?
-					   handle_edge_irq : handle_level_irq,
-					   NULL);
+	irq_set_chip_handler_name_locked(irq_get_irq_data(irq), chip,
+		trigger == IOSAPIC_EDGE ? handle_edge_irq : handle_level_irq,
+		NULL);
 	return 0;
 }
 
@@ -690,7 +690,7 @@ skip_numa_setup:
 	do {
 		if (++cpu >= nr_cpu_ids)
 			cpu = 0;
-	} while (!cpu_online(cpu) || !cpu_isset(cpu, domain));
+	} while (!cpu_online(cpu) || !cpumask_test_cpu(cpu, &domain));
 
 	return cpu_physical_id(cpu);
 #else  /* CONFIG_SMP */
@@ -735,7 +735,7 @@ iosapic_register_intr (unsigned int gsi,
 		rte = find_rte(irq, gsi);
 		if(iosapic_intr_info[irq].count == 0) {
 			assign_irq_vector(irq);
-			dynamic_irq_init(irq);
+			irq_init_desc(irq);
 		} else if (rte->refcnt != NO_REF_RTE) {
 			rte->refcnt++;
 			goto unlock_iosapic_lock;
@@ -838,7 +838,7 @@ iosapic_unregister_intr (unsigned int gsi)
 	if (iosapic_intr_info[irq].count == 0) {
 #ifdef CONFIG_SMP
 		/* Clear affinity */
-		cpumask_setall(irq_get_irq_data(irq)->affinity);
+		cpumask_setall(irq_get_affinity_mask(irq));
 #endif
 		/* Clear the interrupt information */
 		iosapic_intr_info[irq].dest = 0;
@@ -1010,6 +1010,26 @@ iosapic_check_gsi_range (unsigned int gsi_base, unsigned int ver)
 	return 0;
 }
 
+static int
+iosapic_delete_rte(unsigned int irq, unsigned int gsi)
+{
+	struct iosapic_rte_info *rte, *temp;
+
+	list_for_each_entry_safe(rte, temp, &iosapic_intr_info[irq].rtes,
+								rte_list) {
+		if (rte->iosapic->gsi_base + rte->rte_index == gsi) {
+			if (rte->refcnt)
+				return -EBUSY;
+
+			list_del(&rte->rte_list);
+			kfree(rte);
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
 int iosapic_init(unsigned long phys_addr, unsigned int gsi_base)
 {
 	int num_rte, err, index;
@@ -1069,7 +1089,7 @@ int iosapic_init(unsigned long phys_addr, unsigned int gsi_base)
 
 int iosapic_remove(unsigned int gsi_base)
 {
-	int index, err = 0;
+	int i, irq, index, err = 0;
 	unsigned long flags;
 
 	spin_lock_irqsave(&iosapic_lock, flags);
@@ -1085,6 +1105,16 @@ int iosapic_remove(unsigned int gsi_base)
 		printk(KERN_WARNING "%s: IOSAPIC for GSI base %u is busy\n",
 		       __func__, gsi_base);
 		goto out;
+	}
+
+	for (i = gsi_base; i < gsi_base + iosapic_lists[index].num_rte; i++) {
+		irq = __gsi_to_irq(i);
+		if (irq < 0)
+			continue;
+
+		err = iosapic_delete_rte(irq, i);
+		if (err)
+			goto out;
 	}
 
 	iounmap(iosapic_lists[index].addr);

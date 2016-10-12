@@ -40,6 +40,7 @@
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-fh.h>
 #include <media/v4l2-event.h>
+#include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-vmalloc.h>
 #ifdef CONFIG_USB_PWC_INPUT_EVDEV
 #include <linux/input.h>
@@ -210,7 +211,8 @@ struct pwc_raw_frame {
 /* intermediate buffers with raw data from the USB cam */
 struct pwc_frame_buf
 {
-	struct vb2_buffer vb;	/* common v4l buffer stuff -- must be first */
+	/* common v4l buffer stuff -- must be first */
+	struct vb2_v4l2_buffer vb;
 	struct list_head list;
 	void *data;
 	int filled;		/* number of bytes filled */
@@ -226,7 +228,7 @@ struct pwc_device
 	struct list_head queued_bufs;
 	spinlock_t queued_bufs_lock; /* Protects queued_bufs */
 
-	/* Note if taking both locks v4l2_lock must always be locked first! */
+	/* If taking both locks vb_queue_lock must always be locked first! */
 	struct mutex v4l2_lock;      /* Protects everything else */
 	struct mutex vb_queue_lock;  /* Protects vb_queue and capt_file */
 

@@ -57,8 +57,7 @@
 #include "ivtv-gpio.h"
 #include <linux/dma-mapping.h>
 #include <media/tveeprom.h>
-#include <media/saa7115.h>
-#include <media/v4l2-chip-ident.h>
+#include <media/i2c/saa7115.h>
 #include "tuner-xc2028.h"
 
 /* If you have already X v4l cards, then set this to X. This way
@@ -304,7 +303,7 @@ static void request_modules(struct ivtv *dev)
 
 static void flush_request_modules(struct ivtv *dev)
 {
-	flush_work_sync(&dev->request_module_wk);
+	flush_work(&dev->request_module_wk);
 }
 #else
 #define request_modules(dev)
@@ -751,9 +750,9 @@ static int ivtv_init_struct1(struct ivtv *itv)
 	spin_lock_init(&itv->lock);
 	spin_lock_init(&itv->dma_reg_lock);
 
-	init_kthread_worker(&itv->irq_worker);
+	kthread_init_worker(&itv->irq_worker);
 	itv->irq_worker_task = kthread_run(kthread_worker_fn, &itv->irq_worker,
-					   itv->v4l2_dev.name);
+					   "%s", itv->v4l2_dev.name);
 	if (IS_ERR(itv->irq_worker_task)) {
 		IVTV_ERR("Could not create ivtv task\n");
 		return -1;
@@ -761,7 +760,7 @@ static int ivtv_init_struct1(struct ivtv *itv)
 	/* must use the FIFO scheduler as it is realtime sensitive */
 	sched_setscheduler(itv->irq_worker_task, SCHED_FIFO, &param);
 
-	init_kthread_work(&itv->irq_work, ivtv_irq_work_handler);
+	kthread_init_work(&itv->irq_work, ivtv_irq_work_handler);
 
 	/* Initial settings */
 	itv->cxhdl.port = CX2341X_PORT_MEMORY;
@@ -827,7 +826,7 @@ static void ivtv_init_struct2(struct ivtv *itv)
 				IVTV_CARD_INPUT_VID_TUNER)
 			break;
 	}
-	if (i == itv->nof_inputs)
+	if (i >= itv->nof_inputs)
 		i = 0;
 	itv->active_input = i;
 	itv->audio_input = itv->card->video_inputs[i].audio_index;
@@ -968,15 +967,10 @@ static void ivtv_load_and_init_modules(struct ivtv *itv)
 	}
 
 	if (hw & IVTV_HW_SAA711X) {
-		struct v4l2_dbg_chip_ident v;
-
 		/* determine the exact saa711x model */
 		itv->hw_flags &= ~IVTV_HW_SAA711X;
 
-		v.match.type = V4L2_CHIP_MATCH_I2C_DRIVER;
-		strlcpy(v.match.name, "saa7115", sizeof(v.match.name));
-		ivtv_call_hw(itv, IVTV_HW_SAA711X, core, g_chip_ident, &v);
-		if (v.ident == V4L2_IDENT_SAA7114) {
+		if (strstr(itv->sd_video->name, "saa7114")) {
 			itv->hw_flags |= IVTV_HW_SAA7114;
 			/* VBI is not yet supported by the saa7114 driver. */
 			itv->v4l2_cap &= ~(V4L2_CAP_SLICED_VBI_CAPTURE|V4L2_CAP_VBI_CAPTURE);
@@ -1267,7 +1261,7 @@ static int ivtv_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
 
 	/* Register IRQ */
 	retval = request_irq(itv->pdev->irq, ivtv_irq_handler,
-	     IRQF_SHARED | IRQF_DISABLED, itv->v4l2_dev.name, (void *)itv);
+	     IRQF_SHARED, itv->v4l2_dev.name, (void *)itv);
 	if (retval) {
 		IVTV_ERR("Failed to register irq %d\n", retval);
 		goto free_i2c;
@@ -1290,7 +1284,7 @@ static int ivtv_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
 	return 0;
 
 free_streams:
-	ivtv_streams_cleanup(itv, 1);
+	ivtv_streams_cleanup(itv);
 free_irq:
 	free_irq(itv->pdev->irq, (void *)itv);
 free_i2c:
@@ -1387,7 +1381,7 @@ int ivtv_init_on_first_open(struct ivtv *itv)
 	if (!itv->has_cx23415)
 		write_reg_sync(0x03, IVTV_REG_DMACONTROL);
 
-	ivtv_s_std_enc(itv, &itv->tuner_std);
+	ivtv_s_std_enc(itv, itv->tuner_std);
 
 	/* Default interrupts enabled. For the PVR350 this includes the
 	   decoder VSYNC interrupt, which is always on. It is not only used
@@ -1397,7 +1391,7 @@ int ivtv_init_on_first_open(struct ivtv *itv)
 	if (itv->v4l2_cap & V4L2_CAP_VIDEO_OUTPUT) {
 		ivtv_clear_irq_mask(itv, IVTV_IRQ_MASK_INIT | IVTV_IRQ_DEC_VSYNC);
 		ivtv_set_osd_alpha(itv);
-		ivtv_s_std_dec(itv, &itv->tuner_std);
+		ivtv_s_std_dec(itv, itv->tuner_std);
 	} else {
 		ivtv_clear_irq_mask(itv, IVTV_IRQ_MASK_INIT);
 	}
@@ -1447,10 +1441,10 @@ static void ivtv_remove(struct pci_dev *pdev)
 	del_timer_sync(&itv->dma_timer);
 
 	/* Kill irq worker */
-	flush_kthread_worker(&itv->irq_worker);
+	kthread_flush_worker(&itv->irq_worker);
 	kthread_stop(itv->irq_worker_task);
 
-	ivtv_streams_cleanup(itv, 1);
+	ivtv_streams_cleanup(itv);
 	ivtv_udma_free(itv);
 
 	v4l2_ctrl_handler_free(&itv->cxhdl.hdl);

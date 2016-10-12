@@ -256,6 +256,7 @@ extern void lc_destroy(struct lru_cache *lc);
 extern void lc_set(struct lru_cache *lc, unsigned int enr, int index);
 extern void lc_del(struct lru_cache *lc, struct lc_element *element);
 
+extern struct lc_element *lc_get_cumulative(struct lru_cache *lc, unsigned int enr);
 extern struct lc_element *lc_try_get(struct lru_cache *lc, unsigned int enr);
 extern struct lc_element *lc_find(struct lru_cache *lc, unsigned int enr);
 extern struct lc_element *lc_get(struct lru_cache *lc, unsigned int enr);
@@ -263,7 +264,7 @@ extern unsigned int lc_put(struct lru_cache *lc, struct lc_element *e);
 extern void lc_committed(struct lru_cache *lc);
 
 struct seq_file;
-extern size_t lc_seq_printf_stats(struct seq_file *seq, struct lru_cache *lc);
+extern void lc_seq_printf_stats(struct seq_file *seq, struct lru_cache *lc);
 
 extern void lc_seq_dump_details(struct seq_file *seq, struct lru_cache *lc, char *utext,
 				void (*detail) (struct seq_file *, struct lc_element *));

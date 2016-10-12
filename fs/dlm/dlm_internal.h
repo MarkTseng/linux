@@ -66,6 +66,16 @@ struct dlm_mhandle;
 #define log_error(ls, fmt, args...) \
 	printk(KERN_ERR "dlm: %s: " fmt "\n", (ls)->ls_name , ##args)
 
+#define log_rinfo(ls, fmt, args...) \
+do { \
+	if (dlm_config.ci_log_info) \
+		printk(KERN_INFO "dlm: %s: " fmt "\n", \
+			(ls)->ls_name, ##args); \
+	else if (dlm_config.ci_log_debug) \
+		printk(KERN_DEBUG "dlm: %s: " fmt "\n", \
+		       (ls)->ls_name , ##args); \
+} while (0)
+
 #define log_debug(ls, fmt, args...) \
 do { \
 	if (dlm_config.ci_log_debug) \
@@ -96,10 +106,13 @@ do { \
 }
 
 
+#define DLM_RTF_SHRINK		0x00000001
+
 struct dlm_rsbtable {
 	struct rb_root		keep;
 	struct rb_root		toss;
 	spinlock_t		lock;
+	uint32_t		flags;
 };
 
 

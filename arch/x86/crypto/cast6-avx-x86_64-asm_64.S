@@ -4,7 +4,7 @@
  * Copyright (C) 2012 Johannes Goetzfried
  *     <Johannes.Goetzfried@informatik.stud.uni-erlangen.de>
  *
- * Copyright © 2012 Jussi Kivilinna <jussi.kivilinna@mbnet.fi>
+ * Copyright © 2012-2013 Jussi Kivilinna <jussi.kivilinna@iki.fi>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,6 +23,8 @@
  *
  */
 
+#include <linux/linkage.h>
+#include <asm/frame.h>
 #include "glue_helper-asm-avx.S"
 
 .file "cast6-avx-x86_64-asm_64.S"
@@ -226,6 +228,8 @@
 .data
 
 .align 16
+.Lxts_gf128mul_and_shl1_mask:
+	.byte 0x87, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0
 .Lbswap_mask:
 	.byte 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12
 .Lbswap128_mask:
@@ -250,8 +254,6 @@
 .text
 
 .align 8
-.type   __cast6_enc_blk8,@function;
-
 __cast6_enc_blk8:
 	/* input:
 	 *	%rdi: ctx, CTX
@@ -295,10 +297,9 @@ __cast6_enc_blk8:
 	outunpack_blocks(RA2, RB2, RC2, RD2, RTMP, RX, RKRF, RKM);
 
 	ret;
+ENDPROC(__cast6_enc_blk8)
 
 .align 8
-.type   __cast6_dec_blk8,@function;
-
 __cast6_dec_blk8:
 	/* input:
 	 *	%rdi: ctx, CTX
@@ -341,17 +342,15 @@ __cast6_dec_blk8:
 	outunpack_blocks(RA2, RB2, RC2, RD2, RTMP, RX, RKRF, RKM);
 
 	ret;
+ENDPROC(__cast6_dec_blk8)
 
-.align 8
-.global cast6_ecb_enc_8way
-.type   cast6_ecb_enc_8way,@function;
-
-cast6_ecb_enc_8way:
+ENTRY(cast6_ecb_enc_8way)
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
 	 *	%rdx: src
 	 */
+	FRAME_BEGIN
 
 	movq %rsi, %r11;
 
@@ -361,18 +360,17 @@ cast6_ecb_enc_8way:
 
 	store_8way(%r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
+	FRAME_END
 	ret;
+ENDPROC(cast6_ecb_enc_8way)
 
-.align 8
-.global cast6_ecb_dec_8way
-.type   cast6_ecb_dec_8way,@function;
-
-cast6_ecb_dec_8way:
+ENTRY(cast6_ecb_dec_8way)
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
 	 *	%rdx: src
 	 */
+	FRAME_BEGIN
 
 	movq %rsi, %r11;
 
@@ -382,18 +380,17 @@ cast6_ecb_dec_8way:
 
 	store_8way(%r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
 
+	FRAME_END
 	ret;
+ENDPROC(cast6_ecb_dec_8way)
 
-.align 8
-.global cast6_cbc_dec_8way
-.type   cast6_cbc_dec_8way,@function;
-
-cast6_cbc_dec_8way:
+ENTRY(cast6_cbc_dec_8way)
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
 	 *	%rdx: src
 	 */
+	FRAME_BEGIN
 
 	pushq %r12;
 
@@ -408,19 +405,18 @@ cast6_cbc_dec_8way:
 
 	popq %r12;
 
+	FRAME_END
 	ret;
+ENDPROC(cast6_cbc_dec_8way)
 
-.align 8
-.global cast6_ctr_8way
-.type   cast6_ctr_8way,@function;
-
-cast6_ctr_8way:
+ENTRY(cast6_ctr_8way)
 	/* input:
 	 *	%rdi: ctx, CTX
 	 *	%rsi: dst
 	 *	%rdx: src
 	 *	%rcx: iv (little endian, 128bit)
 	 */
+	FRAME_BEGIN
 
 	pushq %r12;
 
@@ -436,4 +432,54 @@ cast6_ctr_8way:
 
 	popq %r12;
 
+	FRAME_END
 	ret;
+ENDPROC(cast6_ctr_8way)
+
+ENTRY(cast6_xts_enc_8way)
+	/* input:
+	 *	%rdi: ctx, CTX
+	 *	%rsi: dst
+	 *	%rdx: src
+	 *	%rcx: iv (t ⊕ αⁿ ∈ GF(2¹²⁸))
+	 */
+	FRAME_BEGIN
+
+	movq %rsi, %r11;
+
+	/* regs <= src, dst <= IVs, regs <= regs xor IVs */
+	load_xts_8way(%rcx, %rdx, %rsi, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2,
+		      RX, RKR, RKM, .Lxts_gf128mul_and_shl1_mask);
+
+	call __cast6_enc_blk8;
+
+	/* dst <= regs xor IVs(in dst) */
+	store_xts_8way(%r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
+
+	FRAME_END
+	ret;
+ENDPROC(cast6_xts_enc_8way)
+
+ENTRY(cast6_xts_dec_8way)
+	/* input:
+	 *	%rdi: ctx, CTX
+	 *	%rsi: dst
+	 *	%rdx: src
+	 *	%rcx: iv (t ⊕ αⁿ ∈ GF(2¹²⁸))
+	 */
+	FRAME_BEGIN
+
+	movq %rsi, %r11;
+
+	/* regs <= src, dst <= IVs, regs <= regs xor IVs */
+	load_xts_8way(%rcx, %rdx, %rsi, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2,
+		      RX, RKR, RKM, .Lxts_gf128mul_and_shl1_mask);
+
+	call __cast6_dec_blk8;
+
+	/* dst <= regs xor IVs(in dst) */
+	store_xts_8way(%r11, RA1, RB1, RC1, RD1, RA2, RB2, RC2, RD2);
+
+	FRAME_END
+	ret;
+ENDPROC(cast6_xts_dec_8way)

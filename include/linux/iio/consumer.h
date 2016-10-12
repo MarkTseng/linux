@@ -15,6 +15,7 @@
 
 struct iio_dev;
 struct iio_chan_spec;
+struct device;
 
 /**
  * struct iio_channel - everything needed for a consumer to use a channel
@@ -30,14 +31,15 @@ struct iio_channel {
 
 /**
  * iio_channel_get() - get description of all that is needed to access channel.
- * @name:		Unique name of the device as provided in the iio_map
+ * @dev:		Pointer to consumer device. Device name must match
+ *			the name of the device as provided in the iio_map
  *			with which the desired provider to consumer mapping
  *			was registered.
  * @consumer_channel:	Unique name to identify the channel on the consumer
  *			side. This typically describes the channels use within
  *			the consumer. E.g. 'battery_voltage'
  */
-struct iio_channel *iio_channel_get(const char *name,
+struct iio_channel *iio_channel_get(struct device *dev,
 				    const char *consumer_channel);
 
 /**
@@ -47,15 +49,42 @@ struct iio_channel *iio_channel_get(const char *name,
 void iio_channel_release(struct iio_channel *chan);
 
 /**
+ * devm_iio_channel_get() - Resource managed version of iio_channel_get().
+ * @dev:		Pointer to consumer device. Device name must match
+ *			the name of the device as provided in the iio_map
+ *			with which the desired provider to consumer mapping
+ *			was registered.
+ * @consumer_channel:	Unique name to identify the channel on the consumer
+ *			side. This typically describes the channels use within
+ *			the consumer. E.g. 'battery_voltage'
+ *
+ * Returns a pointer to negative errno if it is not able to get the iio channel
+ * otherwise returns valid pointer for iio channel.
+ *
+ * The allocated iio channel is automatically released when the device is
+ * unbound.
+ */
+struct iio_channel *devm_iio_channel_get(struct device *dev,
+					 const char *consumer_channel);
+/**
+ * devm_iio_channel_release() - Resource managed version of
+ *				iio_channel_release().
+ * @dev:		Pointer to consumer device for which resource
+ *			is allocared.
+ * @chan:		The channel to be released.
+ */
+void devm_iio_channel_release(struct device *dev, struct iio_channel *chan);
+
+/**
  * iio_channel_get_all() - get all channels associated with a client
- * @name:		name of consumer device.
+ * @dev:		Pointer to consumer device.
  *
  * Returns an array of iio_channel structures terminated with one with
  * null iio_dev pointer.
  * This function is used by fairly generic consumers to get all the
  * channels registered as having this consumer.
  */
-struct iio_channel *iio_channel_get_all(const char *name);
+struct iio_channel *iio_channel_get_all(struct device *dev);
 
 /**
  * iio_channel_release_all() - reverse iio_channel_get_all
@@ -63,10 +92,36 @@ struct iio_channel *iio_channel_get_all(const char *name);
  */
 void iio_channel_release_all(struct iio_channel *chan);
 
+/**
+ * devm_iio_channel_get_all() - Resource managed version of
+ *				iio_channel_get_all().
+ * @dev: Pointer to consumer device.
+ *
+ * Returns a pointer to negative errno if it is not able to get the iio channel
+ * otherwise returns an array of iio_channel structures terminated with one with
+ * null iio_dev pointer.
+ *
+ * This function is used by fairly generic consumers to get all the
+ * channels registered as having this consumer.
+ *
+ * The allocated iio channels are automatically released when the device is
+ * unbounded.
+ */
+struct iio_channel *devm_iio_channel_get_all(struct device *dev);
+
+/**
+ * devm_iio_channel_release_all() - Resource managed version of
+ *				    iio_channel_release_all().
+ * @dev:		Pointer to consumer device for which resource
+ *			is allocared.
+ * @chan:		Array channel to be released.
+ */
+void devm_iio_channel_release_all(struct device *dev, struct iio_channel *chan);
+
 struct iio_cb_buffer;
 /**
  * iio_channel_get_all_cb() - register callback for triggered capture
- * @name:		Name of client device.
+ * @dev:		Pointer to client device.
  * @cb:			Callback function.
  * @private:		Private data passed to callback.
  *
@@ -74,8 +129,8 @@ struct iio_cb_buffer;
  * So if the channels requested come from different devices this will
  * fail.
  */
-struct iio_cb_buffer *iio_channel_get_all_cb(const char *name,
-					     int (*cb)(u8 *data,
+struct iio_cb_buffer *iio_channel_get_all_cb(struct device *dev,
+					     int (*cb)(const void *data,
 						       void *private),
 					     void *private);
 /**
@@ -98,7 +153,7 @@ void iio_channel_stop_all_cb(struct iio_cb_buffer *cb_buff);
 
 /**
  * iio_channel_cb_get_channels() - get access to the underlying channels.
- * @cb_buff:		The callback buffer from whom we want the channel
+ * @cb_buffer:		The callback buffer from whom we want the channel
  *			information.
  *
  * This function allows one to obtain information about the channels.
@@ -110,6 +165,18 @@ struct iio_channel
 *iio_channel_cb_get_channels(const struct iio_cb_buffer *cb_buffer);
 
 /**
+ * iio_channel_cb_get_iio_dev() - get access to the underlying device.
+ * @cb_buffer:		The callback buffer from whom we want the device
+ *			information.
+ *
+ * This function allows one to obtain information about the device.
+ * The primary aim is to allow drivers that are consuming a device to query
+ * things like current trigger.
+ */
+struct iio_dev
+*iio_channel_cb_get_iio_dev(const struct iio_cb_buffer *cb_buffer);
+
+/**
  * iio_read_channel_raw() - read from a given channel
  * @chan:		The channel being queried.
  * @val:		Value read back.
@@ -119,6 +186,19 @@ struct iio_channel
  */
 int iio_read_channel_raw(struct iio_channel *chan,
 			 int *val);
+
+/**
+ * iio_read_channel_average_raw() - read from a given channel
+ * @chan:		The channel being queried.
+ * @val:		Value read back.
+ *
+ * Note raw reads from iio channels are in adc counts and hence
+ * scale will need to be applied if standard units required.
+ *
+ * In opposit to the normal iio_read_channel_raw this function
+ * returns the average of multiple reads.
+ */
+int iio_read_channel_average_raw(struct iio_channel *chan, int *val);
 
 /**
  * iio_read_channel_processed() - read processed value from a given channel
@@ -134,6 +214,16 @@ int iio_read_channel_raw(struct iio_channel *chan,
  * do the appropriate transformation.
  */
 int iio_read_channel_processed(struct iio_channel *chan, int *val);
+
+/**
+ * iio_write_channel_raw() - write to a given channel
+ * @chan:		The channel being queried.
+ * @val:		Value being written.
+ *
+ * Note raw writes to iio channels are in dac counts and hence
+ * scale will need to be applied if standard units required.
+ */
+int iio_write_channel_raw(struct iio_channel *chan, int val);
 
 /**
  * iio_get_channel_type() - get the type of a channel
@@ -176,7 +266,7 @@ int iio_read_channel_scale(struct iio_channel *chan, int *val,
  * The scale factor allows to increase the precession of the returned value. For
  * a scale factor of 1 the function will return the result in the normal IIO
  * unit for the channel type. E.g. millivolt for voltage channels, if you want
- * nanovolts instead pass 1000 as the scale factor.
+ * nanovolts instead pass 1000000 as the scale factor.
  */
 int iio_convert_raw_to_processed(struct iio_channel *chan, int raw,
 	int *processed, unsigned int scale);

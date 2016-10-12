@@ -5,6 +5,7 @@
 
 /* has the defines to get at the registers. */
 
+#include <linux/types.h>
 
 #define PTRACE_TRACEME		   0
 #define PTRACE_PEEKTEXT		   1
@@ -52,6 +53,22 @@
 #define PTRACE_INTERRUPT	0x4207
 #define PTRACE_LISTEN		0x4208
 
+#define PTRACE_PEEKSIGINFO	0x4209
+
+struct ptrace_peeksiginfo_args {
+	__u64 off;	/* from which siginfo to start */
+	__u32 flags;
+	__s32 nr;	/* how may siginfos to take */
+};
+
+#define PTRACE_GETSIGMASK	0x420a
+#define PTRACE_SETSIGMASK	0x420b
+
+#define PTRACE_SECCOMP_GET_FILTER	0x420c
+
+/* Read signals from a shared (process wide) queue */
+#define PTRACE_PEEKSIGINFO_SHARED	(1 << 0)
+
 /* Wait extended result codes for the above trace options.  */
 #define PTRACE_EVENT_FORK	1
 #define PTRACE_EVENT_VFORK	2
@@ -74,9 +91,11 @@
 #define PTRACE_O_TRACESECCOMP	(1 << PTRACE_EVENT_SECCOMP)
 
 /* eventless options */
-#define PTRACE_O_EXITKILL	(1 << 20)
+#define PTRACE_O_EXITKILL		(1 << 20)
+#define PTRACE_O_SUSPEND_SECCOMP	(1 << 21)
 
-#define PTRACE_O_MASK		(0x000000ff | PTRACE_O_EXITKILL)
+#define PTRACE_O_MASK		(\
+	0x000000ff | PTRACE_O_EXITKILL | PTRACE_O_SUSPEND_SECCOMP)
 
 #include <asm/ptrace.h>
 

@@ -41,13 +41,9 @@ static __u8 *cp_report_fixup(struct hid_device *hdev, __u8 *rdesc,
 
 	for (i = 0; i < *rsize - 4; i++)
 		if (rdesc[i] == 0x29 && rdesc[i + 2] == 0x19) {
-			__u8 tmp;
-
 			rdesc[i] = 0x19;
 			rdesc[i + 2] = 0x29;
-			tmp = rdesc[i + 3];
-			rdesc[i + 3] = rdesc[i + 1];
-			rdesc[i + 1] = tmp;
+			swap(rdesc[i + 3], rdesc[i + 1]);
 		}
 	return rdesc;
 }
@@ -144,17 +140,6 @@ static struct hid_driver cp_driver = {
 	.event = cp_event,
 	.probe = cp_probe,
 };
+module_hid_driver(cp_driver);
 
-static int __init cp_init(void)
-{
-	return hid_register_driver(&cp_driver);
-}
-
-static void __exit cp_exit(void)
-{
-	hid_unregister_driver(&cp_driver);
-}
-
-module_init(cp_init);
-module_exit(cp_exit);
 MODULE_LICENSE("GPL");

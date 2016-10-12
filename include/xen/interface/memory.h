@@ -160,6 +160,7 @@ DEFINE_GUEST_HANDLE_STRUCT(xen_machphys_mapping_t);
 #define XENMAPSPACE_gmfn_foreign 4 /* GMFN from another dom,
 				    * XENMEM_add_to_physmap_range only.
 				    */
+#define XENMAPSPACE_dev_mmio     5 /* device mmio region */
 
 /*
  * Sets the GPFN at which a particular page appears in the specified guest's
@@ -190,6 +191,7 @@ DEFINE_GUEST_HANDLE_STRUCT(xen_add_to_physmap);
 
 #define XENMEM_add_to_physmap_range 23
 struct xen_add_to_physmap_range {
+    /* IN */
     /* Which domain to change the mapping for. */
     domid_t domid;
     uint16_t space; /* => enum phys_map_space */
@@ -203,6 +205,11 @@ struct xen_add_to_physmap_range {
 
     /* GPFN in domid where the source mapping page should appear. */
     GUEST_HANDLE(xen_pfn_t) gpfns;
+
+    /* OUT */
+
+    /* Per index error code. */
+    GUEST_HANDLE(int) errs;
 };
 DEFINE_GUEST_HANDLE_STRUCT(xen_add_to_physmap_range);
 

@@ -10,6 +10,7 @@
 
 #include <stdarg.h>
 
+#include <linux/elfcore.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
@@ -22,8 +23,8 @@
 #include <linux/reboot.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
-#include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/cpu.h>
 
 #include <asm/auxio.h>
 #include <asm/oplib.h>
@@ -39,12 +40,13 @@
 #include <asm/unistd.h>
 #include <asm/setup.h>
 
+#include "kernel.h"
+
 /* 
  * Power management idle function 
  * Set in pm platform drivers (apc.c and pmc.c)
  */
-void (*pm_idle)(void);
-EXPORT_SYMBOL(pm_idle);
+void (*sparc_idle)(void);
 
 /* 
  * Power-off handler instantiation for pm.h compliance
@@ -65,23 +67,12 @@ extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
 struct task_struct *last_task_used_math = NULL;
 struct thread_info *current_set[NR_CPUS];
 
-/*
- * the idle loop on a Sparc... ;)
- */
-void cpu_idle(void)
+/* Idle loop support. */
+void arch_cpu_idle(void)
 {
-	set_thread_flag(TIF_POLLING_NRFLAG);
-
-	/* endless idle loop with no priority at all */
-	for (;;) {
-		while (!need_resched()) {
-			if (pm_idle)
-				(*pm_idle)();
-			else
-				cpu_relax();
-		}
-		schedule_preempt_disabled();
-	}
+	if (sparc_idle)
+		(*sparc_idle)();
+	local_irq_enable();
 }
 
 /* XXX cli/sti -> local_irq_xxx here, check this works once SMP is fixed. */
@@ -115,14 +106,20 @@ void machine_restart(char * cmd)
 void machine_power_off(void)
 {
 	if (auxio_power_register &&
-	    (strcmp(of_console_device->type, "serial") || scons_pwroff))
-		*auxio_power_register |= AUXIO_POWER_OFF;
+	    (strcmp(of_console_device->type, "serial") || scons_pwroff)) {
+		u8 power_register = sbus_readb(auxio_power_register);
+		power_register |= AUXIO_POWER_OFF;
+		sbus_writeb(power_register, auxio_power_register);
+	}
+
 	machine_halt();
 }
 
 void show_regs(struct pt_regs *r)
 {
 	struct reg_window32 *rw = (struct reg_window32 *) r->u_regs[14];
+
+	show_regs_print_info(KERN_DEFAULT);
 
         printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx    %s\n",
 	       r->psr, r->pc, r->npc, r->y, print_tainted());
@@ -154,11 +151,13 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 	struct reg_window32 *rw;
 	int count = 0;
 
-	if (tsk != NULL)
-		task_base = (unsigned long) task_stack_page(tsk);
-	else
-		task_base = (unsigned long) current_thread_info();
+	if (!tsk)
+		tsk = current;
 
+	if (tsk == current && !_ksp)
+		__asm__ __volatile__("mov	%%fp, %0" : "=r" (_ksp));
+
+	task_base = (unsigned long) task_stack_page(tsk);
 	fp = (unsigned long) _ksp;
 	do {
 		/* Bogus frame pointer? */
@@ -174,17 +173,6 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 	printk("\n");
 }
 
-void dump_stack(void)
-{
-	unsigned long *ksp;
-
-	__asm__ __volatile__("mov	%%fp, %0"
-			     : "=r" (ksp));
-	show_stack(current, ksp);
-}
-
-EXPORT_SYMBOL(dump_stack);
-
 /*
  * Note: sparc64 has a pretty intricated thread_saved_pc, check it out.
  */
@@ -196,21 +184,21 @@ unsigned long thread_saved_pc(struct task_struct *tsk)
 /*
  * Free current thread data structures etc..
  */
-void exit_thread(void)
+void exit_thread(struct task_struct *tsk)
 {
 #ifndef CONFIG_SMP
-	if(last_task_used_math == current) {
+	if (last_task_used_math == tsk) {
 #else
-	if (test_thread_flag(TIF_USEDFPU)) {
+	if (test_ti_thread_flag(task_thread_info(tsk), TIF_USEDFPU)) {
 #endif
 		/* Keep process from leaving FPU in a bogon state. */
 		put_psr(get_psr() | PSR_EF);
-		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
-		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
+		fpsave(&tsk->thread.float_regs[0], &tsk->thread.fsr,
+		       &tsk->thread.fpqueue[0], &tsk->thread.fpqdepth);
 #ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
-		clear_thread_flag(TIF_USEDFPU);
+		clear_ti_thread_flag(task_thread_info(tsk), TIF_USEDFPU);
 #endif
 	}
 }
@@ -345,11 +333,11 @@ int copy_thread(unsigned long clone_flags, unsigned long sp,
 	childregs = (struct pt_regs *) (new_stack + STACKFRAME_SZ);
 
 	/*
-	 * A new process must start with interrupts closed in 2.5,
-	 * because this is how Mingo's scheduler works (see schedule_tail
-	 * and finish_arch_switch). If we do not do it, a timer interrupt hits
-	 * before we unlock, attempts to re-take the rq->lock, and then we die.
-	 * Thus, kpsr|=PSR_PIL.
+	 * A new process must start with interrupts disabled, see schedule_tail()
+	 * and finish_task_switch(). (If we do not do it and if a timer interrupt
+	 * hits before we unlock and attempts to take the rq->lock, we deadlock.)
+	 *
+	 * Thus, kpsr |= PSR_PIL.
 	 */
 	ti->ksp = (unsigned long) new_stack;
 	p->thread.kregs = childregs;

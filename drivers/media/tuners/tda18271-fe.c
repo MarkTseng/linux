@@ -18,9 +18,11 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#include "tda18271-priv.h"
+#include "tda8290.h"
+
 #include <linux/delay.h>
 #include <linux/videodev2.h>
-#include "tda18271-priv.h"
 
 int tda18271_debug;
 module_param_named(debug, tda18271_debug, int, 0644);
@@ -645,7 +647,7 @@ static int tda18271_calc_rf_filter_curve(struct dvb_frontend *fe)
 	unsigned int i;
 	int ret;
 
-	tda_info("tda18271: performing RF tracking filter calibration\n");
+	tda_info("performing RF tracking filter calibration\n");
 
 	/* wait for die temperature stabilization */
 	msleep(200);
@@ -691,12 +693,12 @@ static int tda18271c2_rf_cal_init(struct dvb_frontend *fe)
 	if (tda_fail(ret))
 		goto fail;
 
-	tda_info("tda18271: RF tracking filter calibration complete\n");
+	tda_info("RF tracking filter calibration complete\n");
 
 	priv->cal_initialized = true;
 	goto end;
 fail:
-	tda_info("tda18271: RF tracking filter calibration failed!\n");
+	tda_info("RF tracking filter calibration failed!\n");
 end:
 	return ret;
 }
@@ -867,12 +869,12 @@ static int tda18271_agc(struct dvb_frontend *fe)
 	int ret = 0;
 
 	switch (priv->config) {
-	case 0:
+	case TDA8290_LNA_OFF:
 		/* no external agc configuration required */
 		if (tda18271_debug & DBG_ADV)
 			tda_dbg("no agc configuration provided\n");
 		break;
-	case 3:
+	case TDA8290_LNA_ON_BRIDGE:
 		/* switch with GPIO of saa713x */
 		tda_dbg("invoking callback\n");
 		if (fe->callback)
@@ -881,8 +883,8 @@ static int tda18271_agc(struct dvb_frontend *fe)
 					   TDA18271_CALLBACK_CMD_AGC_ENABLE,
 					   priv->mode);
 		break;
-	case 1:
-	case 2:
+	case TDA8290_LNA_GP0_HIGH_ON:
+	case TDA8290_LNA_GP0_HIGH_OFF:
 	default:
 		/* n/a - currently not supported */
 		tda_err("unsupported configuration: %d\n", priv->config);
@@ -1122,6 +1124,7 @@ static int tda18271_dump_std_map(struct dvb_frontend *fe)
 	tda18271_dump_std_item(dvbt_7, "dvbt 7");
 	tda18271_dump_std_item(dvbt_8, "dvbt 8");
 	tda18271_dump_std_item(qam_6,  "qam 6 ");
+	tda18271_dump_std_item(qam_7,  "qam 7 ");
 	tda18271_dump_std_item(qam_8,  "qam 8 ");
 
 	return 0;
@@ -1149,6 +1152,7 @@ static int tda18271_update_std_map(struct dvb_frontend *fe,
 	tda18271_update_std(dvbt_7, "dvbt 7");
 	tda18271_update_std(dvbt_8, "dvbt 8");
 	tda18271_update_std(qam_6,  "qam 6");
+	tda18271_update_std(qam_7,  "qam 7");
 	tda18271_update_std(qam_8,  "qam 8");
 
 	return 0;
@@ -1352,11 +1356,3 @@ MODULE_DESCRIPTION("NXP TDA18271HD analog / digital tuner driver");
 MODULE_AUTHOR("Michael Krufky <mkrufky@linuxtv.org>");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("0.4");
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-basic-offset: 8
- * End:
- */

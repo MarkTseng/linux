@@ -45,14 +45,14 @@
 /*
  * Returns the kernel segment base of a given address
  */
-#define KSEGX(a)		((_ACAST32_ (a)) & 0xe0000000)
+#define KSEGX(a)		((_ACAST32_(a)) & _ACAST32_(0xe0000000))
 
 /*
  * Returns the physical address of a CKSEGx / XKPHYS address
  */
 #define CPHYSADDR(a)		((_ACAST32_(a)) & 0x1fffffff)
-#define XPHYSADDR(a)            ((_ACAST64_(a)) &			\
-				 _CONST64_(0x000000ffffffffff))
+#define XPHYSADDR(a)		((_ACAST64_(a)) &			\
+				 _CONST64_(0x0000ffffffffffff))
 
 #ifdef CONFIG_64BIT
 

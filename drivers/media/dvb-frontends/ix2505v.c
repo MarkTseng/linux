@@ -212,7 +212,7 @@ static int ix2505v_set_params(struct dvb_frontend *fe)
 		lpf = 0xb;
 
 	deb_info("Osc=%x b_w=%x lpf=%x\n", local_osc, b_w, lpf);
-	deb_info("Data 0=[%x%x%x%x]\n", data[0], data[1], data[2], data[3]);
+	deb_info("Data 0=[%4phN]\n", data);
 
 	if (fe->ops.i2c_gate_ctrl)
 		fe->ops.i2c_gate_ctrl(fe, 1);
@@ -258,7 +258,7 @@ static int ix2505v_get_frequency(struct dvb_frontend *fe, u32 *frequency)
 	return 0;
 }
 
-static struct dvb_tuner_ops ix2505v_tuner_ops = {
+static const struct dvb_tuner_ops ix2505v_tuner_ops = {
 	.info = {
 		.name = "Sharp IX2505V (B0017)",
 		.frequency_min = 950000,

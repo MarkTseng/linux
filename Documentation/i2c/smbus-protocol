@@ -137,8 +137,8 @@ available for writes where the two data bytes are the other way
 around (not SMBus compliant, but very popular.)
 
 
-SMBus Process Call:  i2c_smbus_process_call()
-=============================================
+SMBus Process Call:
+===================
 
 This command selects a device register (through the Comm byte), sends
 16 bits of data to it, and reads 16 bits of data in return.
@@ -198,6 +198,12 @@ It is the same form as Write Word, with the command code replaced by the
 alerting device's address.
 
 [S] [HostAddr] [Wr] A [DevAddr] A [DataLow] A [DataHigh] A [P]
+
+This is implemented in the following way in the Linux kernel:
+* I2C bus drivers which support SMBus Host Notify should call
+  i2c_setup_smbus_host_notify() to setup SMBus Host Notify support.
+* I2C drivers for devices which can trigger SMBus Host Notify should implement
+  the optional alert() callback.
 
 
 Packet Error Checking (PEC)

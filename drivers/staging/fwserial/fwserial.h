@@ -15,20 +15,21 @@
 #include <linux/serial_reg.h>
 #include <linux/module.h>
 #include <linux/seq_file.h>
+#include <linux/debugfs.h>
 
 #include "dma_fifo.h"
 
 #ifdef FWTTY_PROFILING
 #define DISTRIBUTION_MAX_SIZE     8192
 #define DISTRIBUTION_MAX_INDEX    (ilog2(DISTRIBUTION_MAX_SIZE) + 1)
-static inline void profile_size_distrib(unsigned stat[], unsigned val)
+static inline void fwtty_profile_data(unsigned int stat[], unsigned int val)
 {
 	int n = (val) ? min(ilog2(val) + 1, DISTRIBUTION_MAX_INDEX) : 0;
 	++stat[n];
 }
 #else
 #define DISTRIBUTION_MAX_INDEX    0
-#define profile_size_distrib(st, n)
+#define fwtty_profile_data(st, n)
 #endif
 
 /* Parameters for both VIRT_CABLE_PLUG & VIRT_CABLE_PLUG_RSP mgmt codes */
@@ -77,7 +78,7 @@ struct fwtty_peer {
 	u64			guid;
 	int			generation;
 	int			node_id;
-	unsigned		speed;
+	unsigned int		speed;
 	int			max_payload;
 	u64			mgmt_addr;
 
@@ -90,6 +91,7 @@ struct fwtty_peer {
 	struct rcu_head		rcu;
 
 	spinlock_t		lock;
+	work_func_t		workfn;
 	struct work_struct	work;
 	struct peer_work_params work_params;
 	struct timer_list	timer;
@@ -158,18 +160,17 @@ struct fwserial_mgmt_pkt {
 #define VIRT_CABLE_PLUG_TIMEOUT		(60 * HZ)
 
 struct stats {
-	unsigned	xchars;
-	unsigned	dropped;
-	unsigned	tx_stall;
-	unsigned	fifo_errs;
-	unsigned	sent;
-	unsigned	lost;
-	unsigned	throttled;
-	unsigned	watermark;
-	unsigned	reads[DISTRIBUTION_MAX_INDEX + 1];
-	unsigned	writes[DISTRIBUTION_MAX_INDEX + 1];
-	unsigned	txns[DISTRIBUTION_MAX_INDEX + 1];
-	unsigned	unthrottle[DISTRIBUTION_MAX_INDEX + 1];
+	unsigned int	xchars;
+	unsigned int	dropped;
+	unsigned int	tx_stall;
+	unsigned int	fifo_errs;
+	unsigned int	sent;
+	unsigned int	lost;
+	unsigned int	throttled;
+	unsigned int	reads[DISTRIBUTION_MAX_INDEX + 1];
+	unsigned int	writes[DISTRIBUTION_MAX_INDEX + 1];
+	unsigned int	txns[DISTRIBUTION_MAX_INDEX + 1];
+	unsigned int	unthrottle[DISTRIBUTION_MAX_INDEX + 1];
 };
 
 struct fwconsole_ops {
@@ -182,18 +183,12 @@ struct fwconsole_ops {
 #define FWCON_NOTIFY_ATTACH		1
 #define FWCON_NOTIFY_DETACH		2
 
-struct buffered_rx {
-	struct list_head	list;
-	size_t			n;
-	unsigned char		data[0];
-};
-
 /**
  * fwtty_port: structure used to track/represent underlying tty_port
  * @port: underlying tty_port
  * @device: tty device
  * @index: index into port_table for this particular port
- *    note: minor = index + FWSERIAL_TTY_START_MINOR
+ *    note: minor = index + minor_start assigned by tty_alloc_driver()
  * @serial: back pointer to the containing fw_serial
  * @rx_handler: bus address handler for unique addr region used by remotes
  *              to communicate with this port. Every port uses
@@ -222,13 +217,8 @@ struct buffered_rx {
  *         The work can race with the writer but concurrent sending is
  *         prevented with the IN_TX flag. Scheduled under lock to
  *         limit scheduling when fifo has just been drained.
- * @push: work responsible for pushing buffered rx to the ldisc.
- *	  rx can become buffered if the tty buffer is filled before the
- *	  ldisc throttles the sender.
- * @buf_list: list of buffered rx yet to be sent to ldisc
- * @buffered: byte count of buffered rx
  * @tx_fifo: fifo used to store & block-up writes for dma to remote
- * @max_payload: max bytes transmissable per dma (based on peer's max_payload)
+ * @max_payload: max bytes transmissible per dma (based on peer's max_payload)
  * @status_mask: UART_LSR_* bitmask significant to rx (based on termios)
  * @ignore_mask: UART_LSR_* bitmask of states to ignore (also based on termios)
  * @break_ctl: if set, port is 'sending break' to remote
@@ -247,7 +237,7 @@ struct buffered_rx {
 struct fwtty_port {
 	struct tty_port		   port;
 	struct device		   *device;
-	unsigned		   index;
+	unsigned int		   index;
 	struct fw_serial	   *serial;
 	struct fw_address_handler  rx_handler;
 
@@ -256,30 +246,27 @@ struct fwtty_port {
 
 	wait_queue_head_t	   wait_tx;
 	struct delayed_work	   emit_breaks;
-	unsigned		   cps;
+	unsigned int		   cps;
 	unsigned long		   break_last;
 
 	struct work_struct	   hangup;
 
-	unsigned		   mstatus;
+	unsigned int		   mstatus;
 
 	spinlock_t		   lock;
-	unsigned		   mctrl;
+	unsigned int		   mctrl;
 	struct delayed_work	   drain;
-	struct work_struct	   push;
-	struct list_head	   buf_list;
-	int			   buffered;
 	struct dma_fifo		   tx_fifo;
 	int			   max_payload;
-	unsigned		   status_mask;
-	unsigned		   ignore_mask;
-	unsigned		   break_ctl:1,
+	unsigned int		   status_mask;
+	unsigned int		   ignore_mask;
+	unsigned int		   break_ctl:1,
 				   write_only:1,
 				   overrun:1,
 				   loopback:1;
 	unsigned long		   flags;
 
-	struct fwtty_peer	   *peer;
+	struct fwtty_peer __rcu	   *peer;
 
 	struct async_icount	   icount;
 	struct stats		   stats;
@@ -290,7 +277,6 @@ struct fwtty_port {
 /* bit #s for flags field */
 #define IN_TX                      0
 #define STOP_TX                    1
-#define BUFFERING_RX		   2
 
 /* bitmasks for special mctrl/mstatus bits */
 #define OOB_RX_THROTTLE   0x00010000
@@ -306,8 +292,8 @@ struct fwtty_port {
 #define FREQ_BREAKS        (HZ / 50)
 
 /* Ports are allocated in blocks of num_ports for each fw_card */
-#define MAX_CARD_PORTS           32	/* max # of ports per card */
-#define MAX_TOTAL_PORTS          64	/* max # of ports total    */
+#define MAX_CARD_PORTS           CONFIG_FWTTY_MAX_CARD_PORTS
+#define MAX_TOTAL_PORTS          CONFIG_FWTTY_MAX_TOTAL_PORTS
 
 /* tuning parameters */
 #define FWTTY_PORT_TXFIFO_LEN	4096
@@ -338,6 +324,7 @@ struct fw_serial {
 	struct fw_card	  *card;
 	struct kref	  kref;
 
+	struct dentry	  *debugfs;
 	struct fwtty_peer *self;
 
 	struct list_head  list;
@@ -351,37 +338,21 @@ struct fw_serial {
 #define TTY_DEV_NAME		    "fwtty"	/* ttyFW was taken           */
 static const char tty_dev_name[] =  TTY_DEV_NAME;
 static const char loop_dev_name[] = "fwloop";
-extern bool limit_bw;
 
-struct tty_driver *fwtty_driver;
-
-#define driver_err(s, v...)	pr_err(KBUILD_MODNAME ": " s, ##v)
-
-struct fwtty_port *fwtty_port_get(unsigned index);
-void fwtty_port_put(struct fwtty_port *port);
-
-static inline void fwtty_bind_console(struct fwtty_port *port,
-				      struct fwconsole_ops *fwcon_ops,
-				      void *data)
-{
-	port->con_data = data;
-	port->fwcon_ops = fwcon_ops;
-}
+extern struct tty_driver *fwtty_driver;
 
 /*
  * Returns the max send async payload size in bytes based on the unit device
- * link speed - if set to limit bandwidth to max 20%, use lookup table
+ * link speed. Self-limiting asynchronous bandwidth (via reducing the payload)
+ * is not necessary and does not work, because
+ *   1) asynchronous traffic will absorb all available bandwidth (less that
+ *	being used for isochronous traffic)
+ *   2) isochronous arbitration always wins.
  */
-static inline int link_speed_to_max_payload(unsigned speed)
+static inline int link_speed_to_max_payload(unsigned int speed)
 {
-	static const int max_async[] = { 307, 614, 1229, 2458, };
-	BUILD_BUG_ON(ARRAY_SIZE(max_async) - 1 != SCODE_800);
-
-	speed = clamp(speed, (unsigned) SCODE_100, (unsigned) SCODE_800);
-	if (limit_bw)
-		return max_async[speed];
-	else
-		return 1 << (speed + 9);
+	/* Max async payload is 4096 - see IEEE 1394-2008 tables 6-4, 16-18 */
+	return min(512 << speed, 4096);
 }
 
 #endif /* _FIREWIRE_FWSERIAL_H */

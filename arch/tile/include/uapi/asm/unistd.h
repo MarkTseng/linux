@@ -12,6 +12,7 @@
  *   more details.
  */
 
+#define __ARCH_WANT_RENAMEAT
 #if !defined(__LP64__) || defined(__SYSCALL_COMPAT)
 /* Use the flavor of this syscall that matches the 32-bit API better. */
 #define __ARCH_WANT_SYNC_FILE_RANGE2
@@ -19,6 +20,8 @@
 
 /* Use the standard ABI for syscalls. */
 #include <asm-generic/unistd.h>
+
+#define NR_syscalls __NR_syscalls
 
 /* Additional Tilera-specific syscalls. */
 #define __NR_cacheflush	(__NR_arch_specific_syscall + 1)

@@ -22,7 +22,7 @@ obj-y	:= debugtraps.o dma-nommu.o dumpstack.o 		\
 
 ifndef CONFIG_GENERIC_IOMAP
 obj-y				+= iomap.o
-obj-$(CONFIG_HAS_IOPORT)	+= ioport.o
+obj-$(CONFIG_HAS_IOPORT_MAP)	+= ioport.o
 endif
 
 obj-$(CONFIG_SUPERH32)		+= sys_sh32.o
@@ -31,7 +31,6 @@ obj-$(CONFIG_VSYSCALL)		+= vsyscall/
 obj-$(CONFIG_SMP)		+= smp.o
 obj-$(CONFIG_SH_STANDARD_BIOS)	+= sh_bios.o
 obj-$(CONFIG_KGDB)		+= kgdb.o
-obj-$(CONFIG_SH_CPU_FREQ)	+= cpufreq.o
 obj-$(CONFIG_MODULES)		+= sh_ksyms_$(BITS).o module.o
 obj-$(CONFIG_KEXEC)		+= machine_kexec.o relocate_kernel.o
 obj-$(CONFIG_CRASH_DUMP)	+= crash_dump.o
@@ -47,6 +46,5 @@ obj-$(CONFIG_DWARF_UNWINDER)	+= dwarf.o
 obj-$(CONFIG_PERF_EVENTS)	+= perf_event.o perf_callchain.o
 
 obj-$(CONFIG_HAVE_HW_BREAKPOINT)		+= hw_breakpoint.o
-obj-$(CONFIG_GENERIC_CLOCKEVENTS_BROADCAST)	+= localtimer.o
 
 ccflags-y := -Werror

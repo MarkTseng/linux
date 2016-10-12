@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2012, Intel Corp.
+ * Copyright (C) 2000 - 2016, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -222,7 +222,7 @@ acpi_ds_load2_begin_op(struct acpi_walk_state *walk_state,
 			 */
 			ACPI_WARNING((AE_INFO,
 				      "Type override - [%4.4s] had invalid type (%s) "
-				      "for Scope operator, changed to type ANY\n",
+				      "for Scope operator, changed to type ANY",
 				      acpi_ut_get_node_name(node),
 				      acpi_ut_get_type_name(node->type)));
 
@@ -335,7 +335,7 @@ acpi_ds_load2_begin_op(struct acpi_walk_state *walk_state,
 
 		/* Create a new op */
 
-		op = acpi_ps_alloc_op(walk_state->opcode);
+		op = acpi_ps_alloc_op(walk_state->opcode, walk_state->aml);
 		if (!op) {
 			return_ACPI_STATUS(AE_NO_MEMORY);
 		}
@@ -490,8 +490,8 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 
 			status =
 			    acpi_ds_create_index_field(op,
-						       (acpi_handle) arg->
-						       common.node, walk_state);
+						       (acpi_handle)arg->common.
+						       node, walk_state);
 			break;
 
 		case AML_BANK_FIELD_OP:
@@ -509,6 +509,7 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 			break;
 
 		default:
+
 			/* All NAMED_FIELD opcodes must be handled above */
 			break;
 		}
@@ -548,6 +549,7 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 			break;
 
 		default:
+
 			/* Unknown opcode */
 
 			status = AE_OK;
@@ -596,24 +598,20 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 				 * Executing a method: initialize the region and unlock
 				 * the interpreter
 				 */
-				status =
-				    acpi_ex_create_region(op->named.data,
-							  op->named.length,
-							  region_space,
-							  walk_state);
+				status = acpi_ex_create_region(op->named.data,
+							       op->named.length,
+							       region_space,
+							       walk_state);
 				if (ACPI_FAILURE(status)) {
 					return_ACPI_STATUS(status);
 				}
-
-				acpi_ex_exit_interpreter();
 			}
 
+			acpi_ex_exit_interpreter();
 			status =
 			    acpi_ev_initialize_region
 			    (acpi_ns_get_attached_object(node), FALSE);
-			if (walk_state->method_node) {
-				acpi_ex_enter_interpreter();
-			}
+			acpi_ex_enter_interpreter();
 
 			if (ACPI_FAILURE(status)) {
 				/*
@@ -662,6 +660,7 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 								  length,
 								  walk_state);
 				}
+
 				walk_state->operands[0] = NULL;
 				walk_state->num_operands = 0;
 
@@ -674,6 +673,7 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 #endif				/* ACPI_NO_METHOD_EXECUTION */
 
 		default:
+
 			/* All NAMED_COMPLEX opcodes must be handled above */
 			break;
 		}
@@ -721,10 +721,11 @@ acpi_status acpi_ds_load2_end_op(struct acpi_walk_state *walk_state)
 		break;
 
 	default:
+
 		break;
 	}
 
-      cleanup:
+cleanup:
 
 	/* Remove the Node pushed at the very beginning */
 

@@ -30,17 +30,9 @@ void etrax_gpio_wake_up_check(void); /* drivers/gpio.c */
 void default_idle(void)
 {
 #ifdef CONFIG_ETRAX_GPIO
-  etrax_gpio_wake_up_check();
+	etrax_gpio_wake_up_check();
 #endif
-}
-
-/*
- * Free current thread data structures etc..
- */
-
-void exit_thread(void)
-{
-	/* Nothing needs to be done.  */
+	local_irq_enable();
 }
 
 /* if the watchdog is enabled, we can simply disable interrupts and go
@@ -55,14 +47,14 @@ void hard_reset_now (void)
 	 * code to know about it than the watchdog handler in entry.S and
 	 * this code, implementing hard reset through the watchdog.
 	 */
-#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
+#if defined(CONFIG_ETRAX_WATCHDOG)
 	extern int cause_of_death;
 #endif
 
 	printk("*** HARD RESET ***\n");
 	local_irq_disable();
 
-#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
+#if defined(CONFIG_ETRAX_WATCHDOG)
 	cause_of_death = 0xbedead;
 #else
 	/* Since we dont plan to keep on resetting the watchdog,
@@ -175,6 +167,9 @@ unsigned long get_wchan(struct task_struct *p)
 void show_regs(struct pt_regs * regs)
 {
 	unsigned long usp = rdusp();
+
+	show_regs_print_info(KERN_DEFAULT);
+
 	printk("IRP: %08lx SRP: %08lx DCCR: %08lx USP: %08lx MOF: %08lx\n",
 	       regs->irp, regs->srp, regs->dccr, usp, regs->mof );
 	printk(" r0: %08lx  r1: %08lx   r2: %08lx  r3: %08lx\n",

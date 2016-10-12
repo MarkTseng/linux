@@ -33,6 +33,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/atomic.h>
+#include <linux/bitrev.h>
 
 /* Commands */
 #define SHT15_MEASURE_TEMP		0x03
@@ -139,12 +140,12 @@ static const u8 sht15_crc8_table[] = {
  * @reg:		associated regulator (if specified).
  * @nb:			notifier block to handle notifications of voltage
  *                      changes.
- * @supply_uV:		local copy of supply voltage used to allow use of
+ * @supply_uv:		local copy of supply voltage used to allow use of
  *                      regulator consumer if available.
- * @supply_uV_valid:	indicates that an updated value has not yet been
+ * @supply_uv_valid:	indicates that an updated value has not yet been
  *			obtained from the regulator and so any calculations
  *			based upon it will be invalid.
- * @update_supply_work:	work struct that is used to update the supply_uV.
+ * @update_supply_work:	work struct that is used to update the supply_uv.
  * @interrupt_handled:	flag used to indicate a handler has been scheduled.
  */
 struct sht15_data {
@@ -166,24 +167,11 @@ struct sht15_data {
 	struct device			*hwmon_dev;
 	struct regulator		*reg;
 	struct notifier_block		nb;
-	int				supply_uV;
-	bool				supply_uV_valid;
+	int				supply_uv;
+	bool				supply_uv_valid;
 	struct work_struct		update_supply_work;
 	atomic_t			interrupt_handled;
 };
-
-/**
- * sht15_reverse() - reverse a byte
- * @byte:    byte to reverse.
- */
-static u8 sht15_reverse(u8 byte)
-{
-	u8 i, c;
-
-	for (c = 0, i = 0; i < 8; i++)
-		c |= (!!(byte & (1 << i))) << (7 - i);
-	return c;
-}
 
 /**
  * sht15_crc8() - compute crc8
@@ -196,7 +184,7 @@ static u8 sht15_crc8(struct sht15_data *data,
 		const u8 *value,
 		int len)
 {
-	u8 crc = sht15_reverse(data->val_status & 0x0F);
+	u8 crc = bitrev8(data->val_status & 0x0F);
 
 	while (len--) {
 		crc = sht15_crc8_table[*value ^ crc];
@@ -212,11 +200,13 @@ static u8 sht15_crc8(struct sht15_data *data,
  *
  * This implements section 3.4 of the data sheet
  */
-static void sht15_connection_reset(struct sht15_data *data)
+static int sht15_connection_reset(struct sht15_data *data)
 {
-	int i;
+	int i, err;
 
-	gpio_direction_output(data->pdata->gpio_data, 1);
+	err = gpio_direction_output(data->pdata->gpio_data, 1);
+	if (err)
+		return err;
 	ndelay(SHT15_TSCKL);
 	gpio_set_value(data->pdata->gpio_sck, 0);
 	ndelay(SHT15_TSCKL);
@@ -226,6 +216,7 @@ static void sht15_connection_reset(struct sht15_data *data)
 		gpio_set_value(data->pdata->gpio_sck, 0);
 		ndelay(SHT15_TSCKL);
 	}
+	return 0;
 }
 
 /**
@@ -251,10 +242,14 @@ static inline void sht15_send_bit(struct sht15_data *data, int val)
  * conservative ones used in implementation. This implements
  * figure 12 on the data sheet.
  */
-static void sht15_transmission_start(struct sht15_data *data)
+static int sht15_transmission_start(struct sht15_data *data)
 {
+	int err;
+
 	/* ensure data is high and output */
-	gpio_direction_output(data->pdata->gpio_data, 1);
+	err = gpio_direction_output(data->pdata->gpio_data, 1);
+	if (err)
+		return err;
 	ndelay(SHT15_TSU);
 	gpio_set_value(data->pdata->gpio_sck, 0);
 	ndelay(SHT15_TSCKL);
@@ -270,6 +265,7 @@ static void sht15_transmission_start(struct sht15_data *data)
 	ndelay(SHT15_TSU);
 	gpio_set_value(data->pdata->gpio_sck, 0);
 	ndelay(SHT15_TSCKL);
+	return 0;
 }
 
 /**
@@ -293,13 +289,19 @@ static void sht15_send_byte(struct sht15_data *data, u8 byte)
  */
 static int sht15_wait_for_response(struct sht15_data *data)
 {
-	gpio_direction_input(data->pdata->gpio_data);
+	int err;
+
+	err = gpio_direction_input(data->pdata->gpio_data);
+	if (err)
+		return err;
 	gpio_set_value(data->pdata->gpio_sck, 1);
 	ndelay(SHT15_TSCKH);
 	if (gpio_get_value(data->pdata->gpio_data)) {
 		gpio_set_value(data->pdata->gpio_sck, 0);
 		dev_err(data->dev, "Command not acknowledged\n");
-		sht15_connection_reset(data);
+		err = sht15_connection_reset(data);
+		if (err)
+			return err;
 		return -EIO;
 	}
 	gpio_set_value(data->pdata->gpio_sck, 0);
@@ -317,12 +319,13 @@ static int sht15_wait_for_response(struct sht15_data *data)
  */
 static int sht15_send_cmd(struct sht15_data *data, u8 cmd)
 {
-	int ret = 0;
+	int err;
 
-	sht15_transmission_start(data);
+	err = sht15_transmission_start(data);
+	if (err)
+		return err;
 	sht15_send_byte(data, cmd);
-	ret = sht15_wait_for_response(data);
-	return ret;
+	return sht15_wait_for_response(data);
 }
 
 /**
@@ -352,9 +355,13 @@ static int sht15_soft_reset(struct sht15_data *data)
  * Each byte of data is acknowledged by pulling the data line
  * low for one clock pulse.
  */
-static void sht15_ack(struct sht15_data *data)
+static int sht15_ack(struct sht15_data *data)
 {
-	gpio_direction_output(data->pdata->gpio_data, 0);
+	int err;
+
+	err = gpio_direction_output(data->pdata->gpio_data, 0);
+	if (err)
+		return err;
 	ndelay(SHT15_TSU);
 	gpio_set_value(data->pdata->gpio_sck, 1);
 	ndelay(SHT15_TSU);
@@ -362,7 +369,7 @@ static void sht15_ack(struct sht15_data *data)
 	ndelay(SHT15_TSU);
 	gpio_set_value(data->pdata->gpio_data, 1);
 
-	gpio_direction_input(data->pdata->gpio_data);
+	return gpio_direction_input(data->pdata->gpio_data);
 }
 
 /**
@@ -371,14 +378,19 @@ static void sht15_ack(struct sht15_data *data)
  *
  * This is basically a NAK (single clock pulse, data high).
  */
-static void sht15_end_transmission(struct sht15_data *data)
+static int sht15_end_transmission(struct sht15_data *data)
 {
-	gpio_direction_output(data->pdata->gpio_data, 1);
+	int err;
+
+	err = gpio_direction_output(data->pdata->gpio_data, 1);
+	if (err)
+		return err;
 	ndelay(SHT15_TSU);
 	gpio_set_value(data->pdata->gpio_sck, 1);
 	ndelay(SHT15_TSCKH);
 	gpio_set_value(data->pdata->gpio_sck, 0);
 	ndelay(SHT15_TSCKL);
+	return 0;
 }
 
 /**
@@ -410,17 +422,19 @@ static u8 sht15_read_byte(struct sht15_data *data)
  */
 static int sht15_send_status(struct sht15_data *data, u8 status)
 {
-	int ret;
+	int err;
 
-	ret = sht15_send_cmd(data, SHT15_WRITE_STATUS);
-	if (ret)
-		return ret;
-	gpio_direction_output(data->pdata->gpio_data, 1);
+	err = sht15_send_cmd(data, SHT15_WRITE_STATUS);
+	if (err)
+		return err;
+	err = gpio_direction_output(data->pdata->gpio_data, 1);
+	if (err)
+		return err;
 	ndelay(SHT15_TSU);
 	sht15_send_byte(data, status);
-	ret = sht15_wait_for_response(data);
-	if (ret)
-		return ret;
+	err = sht15_wait_for_response(data);
+	if (err)
+		return err;
 
 	data->val_status = status;
 	return 0;
@@ -446,19 +460,21 @@ static int sht15_update_status(struct sht15_data *data)
 			|| !data->status_valid) {
 		ret = sht15_send_cmd(data, SHT15_READ_STATUS);
 		if (ret)
-			goto error_ret;
+			goto unlock;
 		status = sht15_read_byte(data);
 
 		if (data->checksumming) {
 			sht15_ack(data);
-			dev_checksum = sht15_reverse(sht15_read_byte(data));
+			dev_checksum = bitrev8(sht15_read_byte(data));
 			checksum_vals[0] = SHT15_READ_STATUS;
 			checksum_vals[1] = status;
 			data->checksum_ok = (sht15_crc8(data, checksum_vals, 2)
 					== dev_checksum);
 		}
 
-		sht15_end_transmission(data);
+		ret = sht15_end_transmission(data);
+		if (ret)
+			goto unlock;
 
 		/*
 		 * Perform checksum validation on the received data.
@@ -469,27 +485,27 @@ static int sht15_update_status(struct sht15_data *data)
 			previous_config = data->val_status & 0x07;
 			ret = sht15_soft_reset(data);
 			if (ret)
-				goto error_ret;
+				goto unlock;
 			if (previous_config) {
 				ret = sht15_send_status(data, previous_config);
 				if (ret) {
 					dev_err(data->dev,
 						"CRC validation failed, unable "
 						"to restore device settings\n");
-					goto error_ret;
+					goto unlock;
 				}
 			}
 			ret = -EAGAIN;
-			goto error_ret;
+			goto unlock;
 		}
 
 		data->val_status = status;
 		data->status_valid = true;
 		data->last_status = jiffies;
 	}
-error_ret:
-	mutex_unlock(&data->read_lock);
 
+unlock:
+	mutex_unlock(&data->read_lock);
 	return ret;
 }
 
@@ -511,7 +527,9 @@ static int sht15_measurement(struct sht15_data *data,
 	if (ret)
 		return ret;
 
-	gpio_direction_input(data->pdata->gpio_data);
+	ret = gpio_direction_input(data->pdata->gpio_data);
+	if (ret)
+		return ret;
 	atomic_set(&data->interrupt_handled, 0);
 
 	enable_irq(gpio_to_irq(data->pdata->gpio_data));
@@ -524,9 +542,14 @@ static int sht15_measurement(struct sht15_data *data,
 	ret = wait_event_timeout(data->wait_queue,
 				 (data->state == SHT15_READING_NOTHING),
 				 msecs_to_jiffies(timeout_msecs));
-	if (ret == 0) {/* timeout occurred */
+	if (data->state != SHT15_READING_NOTHING) { /* I/O error occurred */
+		data->state = SHT15_READING_NOTHING;
+		return -EIO;
+	} else if (ret == 0) { /* timeout occurred */
 		disable_irq_nosync(gpio_to_irq(data->pdata->gpio_data));
-		sht15_connection_reset(data);
+		ret = sht15_connection_reset(data);
+		if (ret)
+			return ret;
 		return -ETIME;
 	}
 
@@ -570,17 +593,17 @@ static int sht15_update_measurements(struct sht15_data *data)
 		data->state = SHT15_READING_HUMID;
 		ret = sht15_measurement(data, SHT15_MEASURE_RH, 160);
 		if (ret)
-			goto error_ret;
+			goto unlock;
 		data->state = SHT15_READING_TEMP;
 		ret = sht15_measurement(data, SHT15_MEASURE_TEMP, 400);
 		if (ret)
-			goto error_ret;
+			goto unlock;
 		data->measurements_valid = true;
 		data->last_measurement = jiffies;
 	}
-error_ret:
-	mutex_unlock(&data->read_lock);
 
+unlock:
+	mutex_unlock(&data->read_lock);
 	return ret;
 }
 
@@ -598,8 +621,8 @@ static inline int sht15_calc_temp(struct sht15_data *data)
 
 	for (i = ARRAY_SIZE(temppoints) - 1; i > 0; i--)
 		/* Find pointer to interpolate */
-		if (data->supply_uV > temppoints[i - 1].vdd) {
-			d1 = (data->supply_uV - temppoints[i - 1].vdd)
+		if (data->supply_uv > temppoints[i - 1].vdd) {
+			d1 = (data->supply_uv - temppoints[i - 1].vdd)
 				* (temppoints[i].d1 - temppoints[i - 1].d1)
 				/ (temppoints[i].vdd - temppoints[i - 1].vdd)
 				+ temppoints[i - 1].d1;
@@ -818,7 +841,8 @@ static void sht15_bh_read_data(struct work_struct *work_s)
 	/* Read the data back from the device */
 	val = sht15_read_byte(data);
 	val <<= 8;
-	sht15_ack(data);
+	if (sht15_ack(data))
+		goto wakeup;
 	val |= sht15_read_byte(data);
 
 	if (data->checksumming) {
@@ -826,8 +850,9 @@ static void sht15_bh_read_data(struct work_struct *work_s)
 		 * Ask the device for a checksum and read it back.
 		 * Note: the device sends the checksum byte reversed.
 		 */
-		sht15_ack(data);
-		dev_checksum = sht15_reverse(sht15_read_byte(data));
+		if (sht15_ack(data))
+			goto wakeup;
+		dev_checksum = bitrev8(sht15_read_byte(data));
 		checksum_vals[0] = (data->state == SHT15_READING_TEMP) ?
 			SHT15_MEASURE_TEMP : SHT15_MEASURE_RH;
 		checksum_vals[1] = (u8) (val >> 8);
@@ -837,7 +862,8 @@ static void sht15_bh_read_data(struct work_struct *work_s)
 	}
 
 	/* Tell the device we are done */
-	sht15_end_transmission(data);
+	if (sht15_end_transmission(data))
+		goto wakeup;
 
 	switch (data->state) {
 	case SHT15_READING_TEMP:
@@ -851,6 +877,7 @@ static void sht15_bh_read_data(struct work_struct *work_s)
 	}
 
 	data->state = SHT15_READING_NOTHING;
+wakeup:
 	wake_up(&data->wait_queue);
 }
 
@@ -859,7 +886,7 @@ static void sht15_update_voltage(struct work_struct *work_s)
 	struct sht15_data *data
 		= container_of(work_s, struct sht15_data,
 			       update_supply_work);
-	data->supply_uV = regulator_get_voltage(data->reg);
+	data->supply_uv = regulator_get_voltage(data->reg);
 }
 
 /**
@@ -878,7 +905,7 @@ static int sht15_invalidate_voltage(struct notifier_block *nb,
 	struct sht15_data *data = container_of(nb, struct sht15_data, nb);
 
 	if (event == REGULATOR_EVENT_VOLTAGE_CHANGE)
-		data->supply_uV_valid = false;
+		data->supply_uv_valid = false;
 	schedule_work(&data->update_supply_work);
 
 	return NOTIFY_OK;
@@ -901,12 +928,12 @@ static int sht15_probe(struct platform_device *pdev)
 	data->dev = &pdev->dev;
 	init_waitqueue_head(&data->wait_queue);
 
-	if (pdev->dev.platform_data == NULL) {
+	if (dev_get_platdata(&pdev->dev) == NULL) {
 		dev_err(&pdev->dev, "no platform data supplied\n");
 		return -EINVAL;
 	}
-	data->pdata = pdev->dev.platform_data;
-	data->supply_uV = data->pdata->supply_mv * 1000;
+	data->pdata = dev_get_platdata(&pdev->dev);
+	data->supply_uv = data->pdata->supply_mv * 1000;
 	if (data->pdata->checksum)
 		data->checksumming = true;
 	if (data->pdata->no_otp_reload)
@@ -918,15 +945,21 @@ static int sht15_probe(struct platform_device *pdev)
 	 * If a regulator is available,
 	 * query what the supply voltage actually is!
 	 */
-	data->reg = devm_regulator_get(data->dev, "vcc");
+	data->reg = devm_regulator_get_optional(data->dev, "vcc");
 	if (!IS_ERR(data->reg)) {
 		int voltage;
 
 		voltage = regulator_get_voltage(data->reg);
 		if (voltage)
-			data->supply_uV = voltage;
+			data->supply_uv = voltage;
 
-		regulator_enable(data->reg);
+		ret = regulator_enable(data->reg);
+		if (ret != 0) {
+			dev_err(&pdev->dev,
+				"failed to enable regulator: %d\n", ret);
+			return ret;
+		}
+
 		/*
 		 * Setup a notifier block to update this if another device
 		 * causes the voltage to change
@@ -942,17 +975,17 @@ static int sht15_probe(struct platform_device *pdev)
 	}
 
 	/* Try requesting the GPIOs */
-	ret = devm_gpio_request(&pdev->dev, data->pdata->gpio_sck, "SHT15 sck");
+	ret = devm_gpio_request_one(&pdev->dev, data->pdata->gpio_sck,
+			GPIOF_OUT_INIT_LOW, "SHT15 sck");
 	if (ret) {
-		dev_err(&pdev->dev, "gpio request failed\n");
+		dev_err(&pdev->dev, "clock line GPIO request failed\n");
 		goto err_release_reg;
 	}
-	gpio_direction_output(data->pdata->gpio_sck, 0);
 
 	ret = devm_gpio_request(&pdev->dev, data->pdata->gpio_data,
 				"SHT15 data");
 	if (ret) {
-		dev_err(&pdev->dev, "gpio request failed\n");
+		dev_err(&pdev->dev, "data line GPIO request failed\n");
 		goto err_release_reg;
 	}
 
@@ -966,7 +999,9 @@ static int sht15_probe(struct platform_device *pdev)
 		goto err_release_reg;
 	}
 	disable_irq_nosync(gpio_to_irq(data->pdata->gpio_data));
-	sht15_connection_reset(data);
+	ret = sht15_connection_reset(data);
+	if (ret)
+		goto err_release_reg;
 	ret = sht15_soft_reset(data);
 	if (ret)
 		goto err_release_reg;
@@ -1027,7 +1062,7 @@ static int sht15_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static struct platform_device_id sht15_device_ids[] = {
+static const struct platform_device_id sht15_device_ids[] = {
 	{ "sht10", sht10 },
 	{ "sht11", sht11 },
 	{ "sht15", sht15 },
@@ -1040,7 +1075,6 @@ MODULE_DEVICE_TABLE(platform, sht15_device_ids);
 static struct platform_driver sht15_driver = {
 	.driver = {
 		.name = "sht15",
-		.owner = THIS_MODULE,
 	},
 	.probe = sht15_probe,
 	.remove = sht15_remove,

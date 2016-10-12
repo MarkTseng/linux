@@ -29,8 +29,7 @@ struct tda18218_config {
 	u8 loop_through:1;
 };
 
-#if defined(CONFIG_MEDIA_TUNER_TDA18218) || \
-	(defined(CONFIG_MEDIA_TUNER_TDA18218_MODULE) && defined(MODULE))
+#if IS_REACHABLE(CONFIG_MEDIA_TUNER_TDA18218)
 extern struct dvb_frontend *tda18218_attach(struct dvb_frontend *fe,
 	struct i2c_adapter *i2c, struct tda18218_config *cfg);
 #else

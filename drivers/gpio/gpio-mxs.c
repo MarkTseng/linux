@@ -20,18 +20,20 @@
  * MA  02110-1301, USA.
  */
 
+#include <linux/err.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
-#include <linux/gpio.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
-#include <linux/basic_mmio_gpio.h>
+#include <linux/gpio/driver.h>
+/* FIXME: for gpio_get_value(), replace this by direct register read */
+#include <linux/gpio.h>
 #include <linux/module.h>
 
 #define MXS_SET		0x4
@@ -63,8 +65,9 @@ struct mxs_gpio_port {
 	int id;
 	int irq;
 	struct irq_domain *domain;
-	struct bgpio_chip bgc;
+	struct gpio_chip gc;
 	enum mxs_gpio_id devid;
+	u32 both_edges;
 };
 
 static inline int is_imx23_gpio(struct mxs_gpio_port *port)
@@ -81,13 +84,23 @@ static inline int is_imx28_gpio(struct mxs_gpio_port *port)
 
 static int mxs_gpio_set_irq_type(struct irq_data *d, unsigned int type)
 {
+	u32 val;
 	u32 pin_mask = 1 << d->hwirq;
 	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(d);
 	struct mxs_gpio_port *port = gc->private;
 	void __iomem *pin_addr;
 	int edge;
 
+	port->both_edges &= ~pin_mask;
 	switch (type) {
+	case IRQ_TYPE_EDGE_BOTH:
+		val = gpio_get_value(port->gc.base + d->hwirq);
+		if (val)
+			edge = GPIO_INT_FALL_EDGE;
+		else
+			edge = GPIO_INT_RISE_EDGE;
+		port->both_edges |= pin_mask;
+		break;
 	case IRQ_TYPE_EDGE_RISING:
 		edge = GPIO_INT_RISE_EDGE;
 		break;
@@ -124,11 +137,28 @@ static int mxs_gpio_set_irq_type(struct irq_data *d, unsigned int type)
 	return 0;
 }
 
+static void mxs_flip_edge(struct mxs_gpio_port *port, u32 gpio)
+{
+	u32 bit, val, edge;
+	void __iomem *pin_addr;
+
+	bit = 1 << gpio;
+
+	pin_addr = port->base + PINCTRL_IRQPOL(port);
+	val = readl(pin_addr);
+	edge = val & bit;
+
+	if (edge)
+		writel(bit, pin_addr + MXS_CLR);
+	else
+		writel(bit, pin_addr + MXS_SET);
+}
+
 /* MXS has one interrupt *per* gpio port */
-static void mxs_gpio_irq_handler(u32 irq, struct irq_desc *desc)
+static void mxs_gpio_irq_handler(struct irq_desc *desc)
 {
 	u32 irq_stat;
-	struct mxs_gpio_port *port = irq_get_handler_data(irq);
+	struct mxs_gpio_port *port = irq_desc_get_handler_data(desc);
 
 	desc->irq_data.chip->irq_ack(&desc->irq_data);
 
@@ -137,6 +167,9 @@ static void mxs_gpio_irq_handler(u32 irq, struct irq_desc *desc)
 
 	while (irq_stat != 0) {
 		int irqoffset = fls(irq_stat) - 1;
+		if (port->both_edges & (1 << irqoffset))
+			mxs_flip_edge(port, irqoffset);
+
 		generic_handle_irq(irq_find_mapping(port->domain, irqoffset));
 		irq_stat &= ~(1 << irqoffset);
 	}
@@ -164,13 +197,16 @@ static int mxs_gpio_set_wake_irq(struct irq_data *d, unsigned int enable)
 	return 0;
 }
 
-static void __init mxs_gpio_init_gc(struct mxs_gpio_port *port, int irq_base)
+static int __init mxs_gpio_init_gc(struct mxs_gpio_port *port, int irq_base)
 {
 	struct irq_chip_generic *gc;
 	struct irq_chip_type *ct;
 
 	gc = irq_alloc_generic_chip("gpio-mxs", 1, irq_base,
 				    port->base, handle_level_irq);
+	if (!gc)
+		return -ENOMEM;
+
 	gc->private = port;
 
 	ct = gc->chip_types;
@@ -182,19 +218,30 @@ static void __init mxs_gpio_init_gc(struct mxs_gpio_port *port, int irq_base)
 	ct->regs.ack = PINCTRL_IRQSTAT(port) + MXS_CLR;
 	ct->regs.mask = PINCTRL_IRQEN(port);
 
-	irq_setup_generic_chip(gc, IRQ_MSK(32), 0, IRQ_NOREQUEST, 0);
+	irq_setup_generic_chip(gc, IRQ_MSK(32), IRQ_GC_INIT_NESTED_LOCK,
+			       IRQ_NOREQUEST, 0);
+
+	return 0;
 }
 
 static int mxs_gpio_to_irq(struct gpio_chip *gc, unsigned offset)
 {
-	struct bgpio_chip *bgc = to_bgpio_chip(gc);
-	struct mxs_gpio_port *port =
-		container_of(bgc, struct mxs_gpio_port, bgc);
+	struct mxs_gpio_port *port = gpiochip_get_data(gc);
 
 	return irq_find_mapping(port->domain, offset);
 }
 
-static struct platform_device_id mxs_gpio_ids[] = {
+static int mxs_gpio_get_direction(struct gpio_chip *gc, unsigned offset)
+{
+	struct mxs_gpio_port *port = gpiochip_get_data(gc);
+	u32 mask = 1 << offset;
+	u32 dir;
+
+	dir = readl(port->base + PINCTRL_DOE(port));
+	return !(dir & mask);
+}
+
+static const struct platform_device_id mxs_gpio_ids[] = {
 	{
 		.name = "imx23-gpio",
 		.driver_data = IMX23_GPIO,
@@ -222,7 +269,6 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 	struct device_node *parent;
 	static void __iomem *base;
 	struct mxs_gpio_port *port;
-	struct resource *iores = NULL;
 	int irq_base;
 	int err;
 
@@ -230,16 +276,10 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 	if (!port)
 		return -ENOMEM;
 
-	if (np) {
-		port->id = of_alias_get_id(np, "gpio");
-		if (port->id < 0)
-			return port->id;
-		port->devid = (enum mxs_gpio_id) of_id->data;
-	} else {
-		port->id = pdev->id;
-		port->devid = pdev->id_entry->driver_data;
-	}
-
+	port->id = of_alias_get_id(np, "gpio");
+	if (port->id < 0)
+		return port->id;
+	port->devid = (enum mxs_gpio_id) of_id->data;
 	port->irq = platform_get_irq(pdev, 0);
 	if (port->irq < 0)
 		return port->irq;
@@ -249,14 +289,9 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 	 * share the same one
 	 */
 	if (!base) {
-		if (np) {
-			parent = of_get_parent(np);
-			base = of_iomap(parent, 0);
-			of_node_put(parent);
-		} else {
-			iores = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-			base = devm_request_and_ioremap(&pdev->dev, iores);
-		}
+		parent = of_get_parent(np);
+		base = of_iomap(parent, 0);
+		of_node_put(parent);
 		if (!base)
 			return -EADDRNOTAVAIL;
 	}
@@ -284,30 +319,34 @@ static int mxs_gpio_probe(struct platform_device *pdev)
 	}
 
 	/* gpio-mxs can be a generic irq chip */
-	mxs_gpio_init_gc(port, irq_base);
+	err = mxs_gpio_init_gc(port, irq_base);
+	if (err < 0)
+		goto out_irqdomain_remove;
 
 	/* setup one handler for each entry */
-	irq_set_chained_handler(port->irq, mxs_gpio_irq_handler);
-	irq_set_handler_data(port->irq, port);
+	irq_set_chained_handler_and_data(port->irq, mxs_gpio_irq_handler,
+					 port);
 
-	err = bgpio_init(&port->bgc, &pdev->dev, 4,
+	err = bgpio_init(&port->gc, &pdev->dev, 4,
 			 port->base + PINCTRL_DIN(port),
-			 port->base + PINCTRL_DOUT(port), NULL,
+			 port->base + PINCTRL_DOUT(port) + MXS_SET,
+			 port->base + PINCTRL_DOUT(port) + MXS_CLR,
 			 port->base + PINCTRL_DOE(port), NULL, 0);
 	if (err)
-		goto out_irqdesc_free;
+		goto out_irqdomain_remove;
 
-	port->bgc.gc.to_irq = mxs_gpio_to_irq;
-	port->bgc.gc.base = port->id * 32;
+	port->gc.to_irq = mxs_gpio_to_irq;
+	port->gc.get_direction = mxs_gpio_get_direction;
+	port->gc.base = port->id * 32;
 
-	err = gpiochip_add(&port->bgc.gc);
+	err = gpiochip_add_data(&port->gc, port);
 	if (err)
-		goto out_bgpio_remove;
+		goto out_irqdomain_remove;
 
 	return 0;
 
-out_bgpio_remove:
-	bgpio_remove(&port->bgc);
+out_irqdomain_remove:
+	irq_domain_remove(port->domain);
 out_irqdesc_free:
 	irq_free_descs(irq_base, 32);
 	return err;
@@ -316,7 +355,6 @@ out_irqdesc_free:
 static struct platform_driver mxs_gpio_driver = {
 	.driver		= {
 		.name	= "gpio-mxs",
-		.owner	= THIS_MODULE,
 		.of_match_table = mxs_gpio_dt_ids,
 	},
 	.probe		= mxs_gpio_probe,

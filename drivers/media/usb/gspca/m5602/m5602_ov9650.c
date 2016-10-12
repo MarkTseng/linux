@@ -1,3 +1,4 @@
+
 /*
  * Driver for the ov9650 sensor
  *
@@ -20,26 +21,159 @@
 
 #include "m5602_ov9650.h"
 
-static int ov9650_set_exposure(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_exposure(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_get_gain(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_gain(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_red_balance(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_red_balance(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_blue_balance(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_blue_balance(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_hflip(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_hflip(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_vflip(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_vflip(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_auto_white_balance(struct gspca_dev *gspca_dev,
-					 __s32 *val);
-static int ov9650_set_auto_white_balance(struct gspca_dev *gspca_dev,
-					 __s32 val);
-static int ov9650_get_auto_gain(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_auto_gain(struct gspca_dev *gspca_dev, __s32 val);
-static int ov9650_get_auto_exposure(struct gspca_dev *gspca_dev, __s32 *val);
-static int ov9650_set_auto_exposure(struct gspca_dev *gspca_dev, __s32 val);
+static int ov9650_s_ctrl(struct v4l2_ctrl *ctrl);
+static void ov9650_dump_registers(struct sd *sd);
+
+static const unsigned char preinit_ov9650[][3] = {
+	/* [INITCAM] */
+	{BRIDGE, M5602_XB_MCU_CLK_DIV, 0x02},
+	{BRIDGE, M5602_XB_MCU_CLK_CTRL, 0xb0},
+	{BRIDGE, M5602_XB_SEN_CLK_DIV, 0x00},
+	{BRIDGE, M5602_XB_SEN_CLK_CTRL, 0xb0},
+	{BRIDGE, M5602_XB_ADC_CTRL, 0xc0},
+	{BRIDGE, M5602_XB_SENSOR_CTRL, 0x00},
+
+	{BRIDGE, M5602_XB_SENSOR_TYPE, 0x08},
+	{BRIDGE, M5602_XB_GPIO_DIR, 0x05},
+	{BRIDGE, M5602_XB_GPIO_DAT, 0x04},
+	{BRIDGE, M5602_XB_GPIO_EN_H, 0x06},
+	{BRIDGE, M5602_XB_GPIO_DIR_H, 0x06},
+	{BRIDGE, M5602_XB_GPIO_DAT_H, 0x00},
+	{BRIDGE, M5602_XB_GPIO_DAT, 0x00},
+	{BRIDGE, M5602_XB_I2C_CLK_DIV, 0x0a},
+	/* Reset chip */
+	{SENSOR, OV9650_COM7, OV9650_REGISTER_RESET},
+	/* Enable double clock */
+	{SENSOR, OV9650_CLKRC, 0x80},
+	/* Do something out of spec with the power */
+	{SENSOR, OV9650_OFON, 0x40}
+};
+
+static const unsigned char init_ov9650[][3] = {
+	/* [INITCAM] */
+	{BRIDGE, M5602_XB_MCU_CLK_DIV, 0x02},
+	{BRIDGE, M5602_XB_MCU_CLK_CTRL, 0xb0},
+	{BRIDGE, M5602_XB_SEN_CLK_DIV, 0x00},
+	{BRIDGE, M5602_XB_SEN_CLK_CTRL, 0xb0},
+	{BRIDGE, M5602_XB_ADC_CTRL, 0xc0},
+	{BRIDGE, M5602_XB_SENSOR_CTRL, 0x00},
+
+	{BRIDGE, M5602_XB_SENSOR_TYPE, 0x08},
+	{BRIDGE, M5602_XB_GPIO_DIR, 0x05},
+	{BRIDGE, M5602_XB_GPIO_DAT, 0x04},
+	{BRIDGE, M5602_XB_GPIO_EN_H, 0x06},
+	{BRIDGE, M5602_XB_GPIO_DIR_H, 0x06},
+	{BRIDGE, M5602_XB_GPIO_DAT_H, 0x00},
+	{BRIDGE, M5602_XB_GPIO_DAT, 0x00},
+	{BRIDGE, M5602_XB_I2C_CLK_DIV, 0x0a},
+
+	/* Reset chip */
+	{SENSOR, OV9650_COM7, OV9650_REGISTER_RESET},
+	/* One extra reset is needed in order to make the sensor behave
+	   properly when resuming from ram, could be a timing issue */
+	{SENSOR, OV9650_COM7, OV9650_REGISTER_RESET},
+
+	/* Enable double clock */
+	{SENSOR, OV9650_CLKRC, 0x80},
+	/* Do something out of spec with the power */
+	{SENSOR, OV9650_OFON, 0x40},
+
+	/* Set fast AGC/AEC algorithm with unlimited step size */
+	{SENSOR, OV9650_COM8, OV9650_FAST_AGC_AEC |
+			      OV9650_AEC_UNLIM_STEP_SIZE},
+
+	{SENSOR, OV9650_CHLF, 0x10},
+	{SENSOR, OV9650_ARBLM, 0xbf},
+	{SENSOR, OV9650_ACOM38, 0x81},
+	/* Turn off color matrix coefficient double option */
+	{SENSOR, OV9650_COM16, 0x00},
+	/* Enable color matrix for RGB/YUV, Delay Y channel,
+	set output Y/UV delay to 1 */
+	{SENSOR, OV9650_COM13, 0x19},
+	/* Enable digital BLC, Set output mode to U Y V Y */
+	{SENSOR, OV9650_TSLB, 0x0c},
+	/* Limit the AGC/AEC stable upper region */
+	{SENSOR, OV9650_COM24, 0x00},
+	/* Enable HREF and some out of spec things */
+	{SENSOR, OV9650_COM12, 0x73},
+	/* Set all DBLC offset signs to positive and
+	do some out of spec stuff */
+	{SENSOR, OV9650_DBLC1, 0xdf},
+	{SENSOR, OV9650_COM21, 0x06},
+	{SENSOR, OV9650_RSVD35, 0x91},
+	/* Necessary, no camera stream without it */
+	{SENSOR, OV9650_RSVD16, 0x06},
+	{SENSOR, OV9650_RSVD94, 0x99},
+	{SENSOR, OV9650_RSVD95, 0x99},
+	{SENSOR, OV9650_RSVD96, 0x04},
+	/* Enable full range output */
+	{SENSOR, OV9650_COM15, 0x0},
+	/* Enable HREF at optical black, enable ADBLC bias,
+	enable ADBLC, reset timings at format change */
+	{SENSOR, OV9650_COM6, 0x4b},
+	/* Subtract 32 from the B channel bias */
+	{SENSOR, OV9650_BBIAS, 0xa0},
+	/* Subtract 32 from the Gb channel bias */
+	{SENSOR, OV9650_GbBIAS, 0xa0},
+	/* Do not bypass the analog BLC and to some out of spec stuff */
+	{SENSOR, OV9650_Gr_COM, 0x00},
+	/* Subtract 32 from the R channel bias */
+	{SENSOR, OV9650_RBIAS, 0xa0},
+	/* Subtract 32 from the R channel bias */
+	{SENSOR, OV9650_RBIAS, 0x0},
+	{SENSOR, OV9650_COM26, 0x80},
+	{SENSOR, OV9650_ACOMA9, 0x98},
+	/* Set the AGC/AEC stable region upper limit */
+	{SENSOR, OV9650_AEW, 0x68},
+	/* Set the AGC/AEC stable region lower limit */
+	{SENSOR, OV9650_AEB, 0x5c},
+	/* Set the high and low limit nibbles to 3 */
+	{SENSOR, OV9650_VPT, 0xc3},
+	/* Set the Automatic Gain Ceiling (AGC) to 128x,
+	drop VSYNC at frame drop,
+	limit exposure timing,
+	drop frame when the AEC step is larger than the exposure gap */
+	{SENSOR, OV9650_COM9, 0x6e},
+	/* Set VSYNC negative, Set RESET to SLHS (slave mode horizontal sync)
+	and set PWDN to SLVS (slave mode vertical sync) */
+	{SENSOR, OV9650_COM10, 0x42},
+	/* Set horizontal column start high to default value */
+	{SENSOR, OV9650_HSTART, 0x1a}, /* 210 */
+	/* Set horizontal column end */
+	{SENSOR, OV9650_HSTOP, 0xbf}, /* 1534 */
+	/* Complementing register to the two writes above */
+	{SENSOR, OV9650_HREF, 0xb2},
+	/* Set vertical row start high bits */
+	{SENSOR, OV9650_VSTRT, 0x02},
+	/* Set vertical row end low bits */
+	{SENSOR, OV9650_VSTOP, 0x7e},
+	/* Set complementing vertical frame control */
+	{SENSOR, OV9650_VREF, 0x10},
+	{SENSOR, OV9650_ADC, 0x04},
+	{SENSOR, OV9650_HV, 0x40},
+
+	/* Enable denoise, and white-pixel erase */
+	{SENSOR, OV9650_COM22, OV9650_DENOISE_ENABLE |
+		 OV9650_WHITE_PIXEL_ENABLE |
+		 OV9650_WHITE_PIXEL_OPTION},
+
+	/* Enable VARIOPIXEL */
+	{SENSOR, OV9650_COM3, OV9650_VARIOPIXEL},
+	{SENSOR, OV9650_COM4, OV9650_QVGA_VARIOPIXEL},
+
+	/* Put the sensor in soft sleep mode */
+	{SENSOR, OV9650_COM2, OV9650_SOFT_SLEEP | OV9650_OUTPUT_DRIVE_2X},
+};
+
+static const unsigned char res_init_ov9650[][3] = {
+	{SENSOR, OV9650_COM2, OV9650_OUTPUT_DRIVE_2X},
+
+	{BRIDGE, M5602_XB_LINE_OF_FRAME_H, 0x82},
+	{BRIDGE, M5602_XB_LINE_OF_FRAME_L, 0x00},
+	{BRIDGE, M5602_XB_PIX_OF_LINE_H, 0x82},
+	{BRIDGE, M5602_XB_PIX_OF_LINE_L, 0x00},
+	{BRIDGE, M5602_XB_SIG_INI, 0x01}
+};
 
 /* Vertically and horizontally flips the image if matched, needed for machines
    where the sensor is mounted upside down */
@@ -113,140 +247,6 @@ static
 	{}
 };
 
-static const struct ctrl ov9650_ctrls[] = {
-#define EXPOSURE_IDX 0
-	{
-		{
-			.id		= V4L2_CID_EXPOSURE,
-			.type		= V4L2_CTRL_TYPE_INTEGER,
-			.name		= "exposure",
-			.minimum	= 0x00,
-			.maximum	= 0x1ff,
-			.step		= 0x4,
-			.default_value	= EXPOSURE_DEFAULT,
-			.flags		= V4L2_CTRL_FLAG_SLIDER
-		},
-		.set = ov9650_set_exposure,
-		.get = ov9650_get_exposure
-	},
-#define GAIN_IDX 1
-	{
-		{
-			.id		= V4L2_CID_GAIN,
-			.type		= V4L2_CTRL_TYPE_INTEGER,
-			.name		= "gain",
-			.minimum	= 0x00,
-			.maximum	= 0x3ff,
-			.step		= 0x1,
-			.default_value	= GAIN_DEFAULT,
-			.flags		= V4L2_CTRL_FLAG_SLIDER
-		},
-		.set = ov9650_set_gain,
-		.get = ov9650_get_gain
-	},
-#define RED_BALANCE_IDX 2
-	{
-		{
-			.id		= V4L2_CID_RED_BALANCE,
-			.type		= V4L2_CTRL_TYPE_INTEGER,
-			.name		= "red balance",
-			.minimum	= 0x00,
-			.maximum	= 0xff,
-			.step		= 0x1,
-			.default_value	= RED_GAIN_DEFAULT,
-			.flags		= V4L2_CTRL_FLAG_SLIDER
-		},
-		.set = ov9650_set_red_balance,
-		.get = ov9650_get_red_balance
-	},
-#define BLUE_BALANCE_IDX 3
-	{
-		{
-			.id		= V4L2_CID_BLUE_BALANCE,
-			.type		= V4L2_CTRL_TYPE_INTEGER,
-			.name		= "blue balance",
-			.minimum	= 0x00,
-			.maximum	= 0xff,
-			.step		= 0x1,
-			.default_value	= BLUE_GAIN_DEFAULT,
-			.flags		= V4L2_CTRL_FLAG_SLIDER
-		},
-		.set = ov9650_set_blue_balance,
-		.get = ov9650_get_blue_balance
-	},
-#define HFLIP_IDX 4
-	{
-		{
-			.id		= V4L2_CID_HFLIP,
-			.type		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name		= "horizontal flip",
-			.minimum	= 0,
-			.maximum	= 1,
-			.step		= 1,
-			.default_value	= 0
-		},
-		.set = ov9650_set_hflip,
-		.get = ov9650_get_hflip
-	},
-#define VFLIP_IDX 5
-	{
-		{
-			.id		= V4L2_CID_VFLIP,
-			.type		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name		= "vertical flip",
-			.minimum	= 0,
-			.maximum	= 1,
-			.step		= 1,
-			.default_value	= 0
-		},
-		.set = ov9650_set_vflip,
-		.get = ov9650_get_vflip
-	},
-#define AUTO_WHITE_BALANCE_IDX 6
-	{
-		{
-			.id		= V4L2_CID_AUTO_WHITE_BALANCE,
-			.type		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name		= "auto white balance",
-			.minimum	= 0,
-			.maximum	= 1,
-			.step		= 1,
-			.default_value	= 1
-		},
-		.set = ov9650_set_auto_white_balance,
-		.get = ov9650_get_auto_white_balance
-	},
-#define AUTO_GAIN_CTRL_IDX 7
-	{
-		{
-			.id		= V4L2_CID_AUTOGAIN,
-			.type		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name		= "auto gain control",
-			.minimum	= 0,
-			.maximum	= 1,
-			.step		= 1,
-			.default_value	= 1
-		},
-		.set = ov9650_set_auto_gain,
-		.get = ov9650_get_auto_gain
-	},
-#define AUTO_EXPOSURE_IDX 8
-	{
-		{
-			.id		= V4L2_CID_EXPOSURE_AUTO,
-			.type		= V4L2_CTRL_TYPE_BOOLEAN,
-			.name		= "auto exposure",
-			.minimum	= 0,
-			.maximum	= 1,
-			.step		= 1,
-			.default_value	= 1
-		},
-		.set = ov9650_set_auto_exposure,
-		.get = ov9650_get_auto_exposure
-	}
-
-};
-
 static struct v4l2_pix_format ov9650_modes[] = {
 	{
 		176,
@@ -291,13 +291,15 @@ static struct v4l2_pix_format ov9650_modes[] = {
 	}
 };
 
-static void ov9650_dump_registers(struct sd *sd);
+static const struct v4l2_ctrl_ops ov9650_ctrl_ops = {
+	.s_ctrl = ov9650_s_ctrl,
+};
 
 int ov9650_probe(struct sd *sd)
 {
 	int err = 0;
 	u8 prod_id = 0, ver_id = 0, i;
-	s32 *sensor_settings;
+	struct gspca_dev *gspca_dev = (struct gspca_dev *)sd;
 
 	if (force_sensor) {
 		if (force_sensor == OV9650_SENSOR) {
@@ -338,19 +340,9 @@ int ov9650_probe(struct sd *sd)
 	return -ENODEV;
 
 sensor_found:
-	sensor_settings = kmalloc(
-		ARRAY_SIZE(ov9650_ctrls) * sizeof(s32), GFP_KERNEL);
-	if (!sensor_settings)
-		return -ENOMEM;
-
 	sd->gspca_dev.cam.cam_mode = ov9650_modes;
 	sd->gspca_dev.cam.nmodes = ARRAY_SIZE(ov9650_modes);
-	sd->desc->ctrls = ov9650_ctrls;
-	sd->desc->nctrls = ARRAY_SIZE(ov9650_ctrls);
 
-	for (i = 0; i < ARRAY_SIZE(ov9650_ctrls); i++)
-		sensor_settings[i] = ov9650_ctrls[i].qctrl.default_value;
-	sd->sensor_priv = sensor_settings;
 	return 0;
 }
 
@@ -358,7 +350,6 @@ int ov9650_init(struct sd *sd)
 {
 	int i, err = 0;
 	u8 data;
-	s32 *sensor_settings = sd->sensor_priv;
 
 	if (dump_sensor)
 		ov9650_dump_registers(sd);
@@ -372,46 +363,52 @@ int ov9650_init(struct sd *sd)
 			err = m5602_write_bridge(sd, init_ov9650[i][1], data);
 	}
 
-	err = ov9650_set_exposure(&sd->gspca_dev,
-				   sensor_settings[EXPOSURE_IDX]);
-	if (err < 0)
-		return err;
+	return 0;
+}
 
-	err = ov9650_set_gain(&sd->gspca_dev, sensor_settings[GAIN_IDX]);
-	if (err < 0)
-		return err;
+int ov9650_init_controls(struct sd *sd)
+{
+	struct v4l2_ctrl_handler *hdl = &sd->gspca_dev.ctrl_handler;
 
-	err = ov9650_set_red_balance(&sd->gspca_dev,
-				      sensor_settings[RED_BALANCE_IDX]);
-	if (err < 0)
-		return err;
+	sd->gspca_dev.vdev.ctrl_handler = hdl;
+	v4l2_ctrl_handler_init(hdl, 9);
 
-	err = ov9650_set_blue_balance(&sd->gspca_dev,
-				       sensor_settings[BLUE_BALANCE_IDX]);
-	if (err < 0)
-		return err;
+	sd->auto_white_bal = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops,
+					       V4L2_CID_AUTO_WHITE_BALANCE,
+					       0, 1, 1, 1);
+	sd->red_bal = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops,
+					V4L2_CID_RED_BALANCE, 0, 255, 1,
+					RED_GAIN_DEFAULT);
+	sd->blue_bal = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops,
+					V4L2_CID_BLUE_BALANCE, 0, 255, 1,
+					BLUE_GAIN_DEFAULT);
 
-	err = ov9650_set_hflip(&sd->gspca_dev, sensor_settings[HFLIP_IDX]);
-	if (err < 0)
-		return err;
+	sd->autoexpo = v4l2_ctrl_new_std_menu(hdl, &ov9650_ctrl_ops,
+			  V4L2_CID_EXPOSURE_AUTO, 1, 0, V4L2_EXPOSURE_AUTO);
+	sd->expo = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops, V4L2_CID_EXPOSURE,
+			  0, 0x1ff, 4, EXPOSURE_DEFAULT);
 
-	err = ov9650_set_vflip(&sd->gspca_dev, sensor_settings[VFLIP_IDX]);
-	if (err < 0)
-		return err;
+	sd->autogain = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops,
+					 V4L2_CID_AUTOGAIN, 0, 1, 1, 1);
+	sd->gain = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops, V4L2_CID_GAIN, 0,
+				     0x3ff, 1, GAIN_DEFAULT);
 
-	err = ov9650_set_auto_exposure(&sd->gspca_dev,
-				sensor_settings[AUTO_EXPOSURE_IDX]);
-	if (err < 0)
-		return err;
+	sd->hflip = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops, V4L2_CID_HFLIP,
+				      0, 1, 1, 0);
+	sd->vflip = v4l2_ctrl_new_std(hdl, &ov9650_ctrl_ops, V4L2_CID_VFLIP,
+				      0, 1, 1, 0);
 
-	err = ov9650_set_auto_white_balance(&sd->gspca_dev,
-				sensor_settings[AUTO_WHITE_BALANCE_IDX]);
-	if (err < 0)
-		return err;
+	if (hdl->error) {
+		pr_err("Could not initialize controls\n");
+		return hdl->error;
+	}
 
-	err = ov9650_set_auto_gain(&sd->gspca_dev,
-				sensor_settings[AUTO_GAIN_CTRL_IDX]);
-	return err;
+	v4l2_ctrl_auto_cluster(3, &sd->auto_white_bal, 0, false);
+	v4l2_ctrl_auto_cluster(2, &sd->autoexpo, 0, false);
+	v4l2_ctrl_auto_cluster(2, &sd->autogain, 0, false);
+	v4l2_ctrl_cluster(2, &sd->hflip);
+
+	return 0;
 }
 
 int ov9650_start(struct sd *sd)
@@ -419,17 +416,17 @@ int ov9650_start(struct sd *sd)
 	u8 data;
 	int i, err = 0;
 	struct cam *cam = &sd->gspca_dev.cam;
-	s32 *sensor_settings = sd->sensor_priv;
 
 	int width = cam->cam_mode[sd->gspca_dev.curr_mode].width;
 	int height = cam->cam_mode[sd->gspca_dev.curr_mode].height;
 	int ver_offs = cam->cam_mode[sd->gspca_dev.curr_mode].priv;
 	int hor_offs = OV9650_LEFT_OFFSET;
+	struct gspca_dev *gspca_dev = (struct gspca_dev *)sd;
 
 	if ((!dmi_check_system(ov9650_flip_dmi_table) &&
-		sensor_settings[VFLIP_IDX]) ||
+		sd->vflip->val) ||
 		(dmi_check_system(ov9650_flip_dmi_table) &&
-		!sensor_settings[VFLIP_IDX]))
+		!sd->vflip->val))
 		ver_offs--;
 
 	if (width <= 320)
@@ -508,7 +505,7 @@ int ov9650_start(struct sd *sd)
 
 	switch (width) {
 	case 640:
-		PDEBUG(D_V4L2, "Configuring camera for VGA mode");
+		PDEBUG(D_CONF, "Configuring camera for VGA mode");
 
 		data = OV9650_VGA_SELECT | OV9650_RGB_SELECT |
 		       OV9650_RAW_RGB_SELECT;
@@ -516,7 +513,7 @@ int ov9650_start(struct sd *sd)
 		break;
 
 	case 352:
-		PDEBUG(D_V4L2, "Configuring camera for CIF mode");
+		PDEBUG(D_CONF, "Configuring camera for CIF mode");
 
 		data = OV9650_CIF_SELECT | OV9650_RGB_SELECT |
 				OV9650_RAW_RGB_SELECT;
@@ -524,7 +521,7 @@ int ov9650_start(struct sd *sd)
 		break;
 
 	case 320:
-		PDEBUG(D_V4L2, "Configuring camera for QVGA mode");
+		PDEBUG(D_CONF, "Configuring camera for QVGA mode");
 
 		data = OV9650_QVGA_SELECT | OV9650_RGB_SELECT |
 				OV9650_RAW_RGB_SELECT;
@@ -532,7 +529,7 @@ int ov9650_start(struct sd *sd)
 		break;
 
 	case 176:
-		PDEBUG(D_V4L2, "Configuring camera for QCIF mode");
+		PDEBUG(D_CONF, "Configuring camera for QCIF mode");
 
 		data = OV9650_QCIF_SELECT | OV9650_RGB_SELECT |
 			OV9650_RAW_RGB_SELECT;
@@ -553,29 +550,16 @@ void ov9650_disconnect(struct sd *sd)
 	ov9650_stop(sd);
 
 	sd->sensor = NULL;
-	kfree(sd->sensor_priv);
-}
-
-static int ov9650_get_exposure(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[EXPOSURE_IDX];
-	PDEBUG(D_V4L2, "Read exposure %d", *val);
-	return 0;
 }
 
 static int ov9650_set_exposure(struct gspca_dev *gspca_dev, __s32 val)
 {
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 	u8 i2c_data;
 	int err;
 
-	PDEBUG(D_V4L2, "Set exposure to %d", val);
+	PDEBUG(D_CONF, "Set exposure to %d", val);
 
-	sensor_settings[EXPOSURE_IDX] = val;
 	/* The 6 MSBs */
 	i2c_data = (val >> 10) & 0x3f;
 	err = m5602_write_sensor(sd, OV9650_AECHM,
@@ -596,26 +580,13 @@ static int ov9650_set_exposure(struct gspca_dev *gspca_dev, __s32 val)
 	return err;
 }
 
-static int ov9650_get_gain(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[GAIN_IDX];
-	PDEBUG(D_V4L2, "Read gain %d", *val);
-	return 0;
-}
-
 static int ov9650_set_gain(struct gspca_dev *gspca_dev, __s32 val)
 {
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 
-	PDEBUG(D_V4L2, "Setting gain to %d", val);
-
-	sensor_settings[GAIN_IDX] = val;
+	PDEBUG(D_CONF, "Setting gain to %d", val);
 
 	/* The 2 MSB */
 	/* Read the OV9650_VREF register first to avoid
@@ -637,41 +608,17 @@ static int ov9650_set_gain(struct gspca_dev *gspca_dev, __s32 val)
 	return err;
 }
 
-static int ov9650_get_red_balance(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[RED_BALANCE_IDX];
-	PDEBUG(D_V4L2, "Read red gain %d", *val);
-	return 0;
-}
-
 static int ov9650_set_red_balance(struct gspca_dev *gspca_dev, __s32 val)
 {
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 
-	PDEBUG(D_V4L2, "Set red gain to %d", val);
-
-	sensor_settings[RED_BALANCE_IDX] = val;
+	PDEBUG(D_CONF, "Set red gain to %d", val);
 
 	i2c_data = val & 0xff;
 	err = m5602_write_sensor(sd, OV9650_RED, &i2c_data, 1);
 	return err;
-}
-
-static int ov9650_get_blue_balance(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[BLUE_BALANCE_IDX];
-	PDEBUG(D_V4L2, "Read blue gain %d", *val);
-
-	return 0;
 }
 
 static int ov9650_set_blue_balance(struct gspca_dev *gspca_dev, __s32 val)
@@ -679,75 +626,28 @@ static int ov9650_set_blue_balance(struct gspca_dev *gspca_dev, __s32 val)
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 
-	PDEBUG(D_V4L2, "Set blue gain to %d", val);
-
-	sensor_settings[BLUE_BALANCE_IDX] = val;
+	PDEBUG(D_CONF, "Set blue gain to %d", val);
 
 	i2c_data = val & 0xff;
 	err = m5602_write_sensor(sd, OV9650_BLUE, &i2c_data, 1);
 	return err;
 }
 
-static int ov9650_get_hflip(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[HFLIP_IDX];
-	PDEBUG(D_V4L2, "Read horizontal flip %d", *val);
-	return 0;
-}
-
-static int ov9650_set_hflip(struct gspca_dev *gspca_dev, __s32 val)
+static int ov9650_set_hvflip(struct gspca_dev *gspca_dev)
 {
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
+	int hflip = sd->hflip->val;
+	int vflip = sd->vflip->val;
 
-	PDEBUG(D_V4L2, "Set horizontal flip to %d", val);
-
-	sensor_settings[HFLIP_IDX] = val;
-
-	if (!dmi_check_system(ov9650_flip_dmi_table))
-		i2c_data = ((val & 0x01) << 5) |
-				(sensor_settings[VFLIP_IDX] << 4);
-	else
-		i2c_data = ((val & 0x01) << 5) |
-				(!sensor_settings[VFLIP_IDX] << 4);
-
-	err = m5602_write_sensor(sd, OV9650_MVFP, &i2c_data, 1);
-
-	return err;
-}
-
-static int ov9650_get_vflip(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[VFLIP_IDX];
-	PDEBUG(D_V4L2, "Read vertical flip %d", *val);
-
-	return 0;
-}
-
-static int ov9650_set_vflip(struct gspca_dev *gspca_dev, __s32 val)
-{
-	int err;
-	u8 i2c_data;
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	PDEBUG(D_V4L2, "Set vertical flip to %d", val);
-	sensor_settings[VFLIP_IDX] = val;
+	PDEBUG(D_CONF, "Set hvflip to %d %d", hflip, vflip);
 
 	if (dmi_check_system(ov9650_flip_dmi_table))
-		val = !val;
+		vflip = !vflip;
 
-	i2c_data = ((val & 0x01) << 4) | (sensor_settings[VFLIP_IDX] << 5);
+	i2c_data = (hflip << 5) | (vflip << 4);
 	err = m5602_write_sensor(sd, OV9650_MVFP, &i2c_data, 1);
 	if (err < 0)
 		return err;
@@ -759,44 +659,23 @@ static int ov9650_set_vflip(struct gspca_dev *gspca_dev, __s32 val)
 	return err;
 }
 
-static int ov9650_get_auto_exposure(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[AUTO_EXPOSURE_IDX];
-	PDEBUG(D_V4L2, "Read auto exposure control %d", *val);
-	return 0;
-}
-
 static int ov9650_set_auto_exposure(struct gspca_dev *gspca_dev,
 				    __s32 val)
 {
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 
-	PDEBUG(D_V4L2, "Set auto exposure control to %d", val);
+	PDEBUG(D_CONF, "Set auto exposure control to %d", val);
 
-	sensor_settings[AUTO_EXPOSURE_IDX] = val;
 	err = m5602_read_sensor(sd, OV9650_COM8, &i2c_data, 1);
 	if (err < 0)
 		return err;
 
+	val = (val == V4L2_EXPOSURE_AUTO);
 	i2c_data = ((i2c_data & 0xfe) | ((val & 0x01) << 0));
 
 	return m5602_write_sensor(sd, OV9650_COM8, &i2c_data, 1);
-}
-
-static int ov9650_get_auto_white_balance(struct gspca_dev *gspca_dev,
-					 __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[AUTO_WHITE_BALANCE_IDX];
-	return 0;
 }
 
 static int ov9650_set_auto_white_balance(struct gspca_dev *gspca_dev,
@@ -805,11 +684,9 @@ static int ov9650_set_auto_white_balance(struct gspca_dev *gspca_dev,
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 
-	PDEBUG(D_V4L2, "Set auto white balance to %d", val);
+	PDEBUG(D_CONF, "Set auto white balance to %d", val);
 
-	sensor_settings[AUTO_WHITE_BALANCE_IDX] = val;
 	err = m5602_read_sensor(sd, OV9650_COM8, &i2c_data, 1);
 	if (err < 0)
 		return err;
@@ -820,26 +697,14 @@ static int ov9650_set_auto_white_balance(struct gspca_dev *gspca_dev,
 	return err;
 }
 
-static int ov9650_get_auto_gain(struct gspca_dev *gspca_dev, __s32 *val)
-{
-	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
-
-	*val = sensor_settings[AUTO_GAIN_CTRL_IDX];
-	PDEBUG(D_V4L2, "Read auto gain control %d", *val);
-	return 0;
-}
-
 static int ov9650_set_auto_gain(struct gspca_dev *gspca_dev, __s32 val)
 {
 	int err;
 	u8 i2c_data;
 	struct sd *sd = (struct sd *) gspca_dev;
-	s32 *sensor_settings = sd->sensor_priv;
 
-	PDEBUG(D_V4L2, "Set auto gain control to %d", val);
+	PDEBUG(D_CONF, "Set auto gain control to %d", val);
 
-	sensor_settings[AUTO_GAIN_CTRL_IDX] = val;
 	err = m5602_read_sensor(sd, OV9650_COM8, &i2c_data, 1);
 	if (err < 0)
 		return err;
@@ -847,6 +712,48 @@ static int ov9650_set_auto_gain(struct gspca_dev *gspca_dev, __s32 val)
 	i2c_data = ((i2c_data & 0xfb) | ((val & 0x01) << 2));
 
 	return m5602_write_sensor(sd, OV9650_COM8, &i2c_data, 1);
+}
+
+static int ov9650_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct gspca_dev *gspca_dev =
+		container_of(ctrl->handler, struct gspca_dev, ctrl_handler);
+	struct sd *sd = (struct sd *) gspca_dev;
+	int err;
+
+	if (!gspca_dev->streaming)
+		return 0;
+
+	switch (ctrl->id) {
+	case V4L2_CID_AUTO_WHITE_BALANCE:
+		err = ov9650_set_auto_white_balance(gspca_dev, ctrl->val);
+		if (err || ctrl->val)
+			return err;
+		err = ov9650_set_red_balance(gspca_dev, sd->red_bal->val);
+		if (err)
+			return err;
+		err = ov9650_set_blue_balance(gspca_dev, sd->blue_bal->val);
+		break;
+	case V4L2_CID_EXPOSURE_AUTO:
+		err = ov9650_set_auto_exposure(gspca_dev, ctrl->val);
+		if (err || ctrl->val == V4L2_EXPOSURE_AUTO)
+			return err;
+		err = ov9650_set_exposure(gspca_dev, sd->expo->val);
+		break;
+	case V4L2_CID_AUTOGAIN:
+		err = ov9650_set_auto_gain(gspca_dev, ctrl->val);
+		if (err || ctrl->val)
+			return err;
+		err = ov9650_set_gain(gspca_dev, sd->gain->val);
+		break;
+	case V4L2_CID_HFLIP:
+		err = ov9650_set_hvflip(gspca_dev);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return err;
 }
 
 static void ov9650_dump_registers(struct sd *sd)

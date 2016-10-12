@@ -15,10 +15,11 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 #include <linux/io.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 
 #include <mach/hardware.h>
 #include <asm/setup.h>
+#include <asm/irq.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -97,8 +98,8 @@ static void cs3_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 static int cs3_gpio_get(struct gpio_chip *chip, unsigned offset)
 {
 	if (offset > 15)
-		return simpad_get_cs3_ro() & (1 << (offset - 16));
-	return simpad_get_cs3_shadow() & (1 << offset);
+		return !!(simpad_get_cs3_ro() & (1 << (offset - 16)));
+	return !!(simpad_get_cs3_shadow() & (1 << offset));
 };
 
 static int cs3_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
@@ -368,7 +369,7 @@ static int __init simpad_init(void)
 	cs3_gpio.get = cs3_gpio_get;
 	cs3_gpio.direction_input = cs3_gpio_direction_input;
 	cs3_gpio.direction_output = cs3_gpio_direction_output;
-	ret = gpiochip_add(&cs3_gpio);
+	ret = gpiochip_add_data(&cs3_gpio, NULL);
 	if (ret)
 		printk(KERN_WARNING "simpad: Unable to register cs3 GPIO device");
 
@@ -396,6 +397,6 @@ MACHINE_START(SIMPAD, "Simpad")
 	.nr_irqs	= SA1100_NR_IRQS,
 	.init_irq	= sa1100_init_irq,
 	.init_late	= sa11x0_init_late,
-	.timer		= &sa1100_timer,
+	.init_time	= sa1100_timer_init,
 	.restart	= sa11x0_restart,
 MACHINE_END

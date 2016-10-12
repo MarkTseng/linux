@@ -8,7 +8,7 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/blkdev.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/backing-dev.h>
 #include <linux/interrupt.h>
 #include <asm/uaccess.h>
@@ -612,7 +612,7 @@ unsigned long __copy_from_user_ll_nocache(void *to, const void __user *from,
 {
 	stac();
 #ifdef CONFIG_X86_INTEL_USERCOPY
-	if (n > 64 && cpu_has_xmm2)
+	if (n > 64 && static_cpu_has(X86_FEATURE_XMM2))
 		n = __copy_user_zeroing_intel_nocache(to, from, n);
 	else
 		__copy_user_zeroing(to, from, n);
@@ -629,7 +629,7 @@ unsigned long __copy_from_user_ll_nocache_nozero(void *to, const void __user *fr
 {
 	stac();
 #ifdef CONFIG_X86_INTEL_USERCOPY
-	if (n > 64 && cpu_has_xmm2)
+	if (n > 64 && static_cpu_has(X86_FEATURE_XMM2))
 		n = __copy_user_intel_nocache(to, from, n);
 	else
 		__copy_user(to, from, n);
@@ -647,21 +647,21 @@ EXPORT_SYMBOL(__copy_from_user_ll_nocache_nozero);
  * @from: Source address, in kernel space.
  * @n:    Number of bytes to copy.
  *
- * Context: User context only.  This function may sleep.
+ * Context: User context only. This function may sleep if pagefaults are
+ *          enabled.
  *
  * Copy data from kernel space to user space.
  *
  * Returns number of bytes that could not be copied.
  * On success, this will be zero.
  */
-unsigned long
-copy_to_user(void __user *to, const void *from, unsigned long n)
+unsigned long _copy_to_user(void __user *to, const void *from, unsigned n)
 {
 	if (access_ok(VERIFY_WRITE, to, n))
 		n = __copy_to_user(to, from, n);
 	return n;
 }
-EXPORT_SYMBOL(copy_to_user);
+EXPORT_SYMBOL(_copy_to_user);
 
 /**
  * copy_from_user: - Copy a block of data from user space.
@@ -669,7 +669,8 @@ EXPORT_SYMBOL(copy_to_user);
  * @from: Source address, in user space.
  * @n:    Number of bytes to copy.
  *
- * Context: User context only.  This function may sleep.
+ * Context: User context only. This function may sleep if pagefaults are
+ *          enabled.
  *
  * Copy data from user space to kernel space.
  *
@@ -679,8 +680,7 @@ EXPORT_SYMBOL(copy_to_user);
  * If some data could not be copied, this function will pad the copied
  * data to the requested size using zero bytes.
  */
-unsigned long
-_copy_from_user(void *to, const void __user *from, unsigned long n)
+unsigned long _copy_from_user(void *to, const void __user *from, unsigned n)
 {
 	if (access_ok(VERIFY_READ, from, n))
 		n = __copy_from_user(to, from, n);
@@ -689,9 +689,3 @@ _copy_from_user(void *to, const void __user *from, unsigned long n)
 	return n;
 }
 EXPORT_SYMBOL(_copy_from_user);
-
-void copy_from_user_overflow(void)
-{
-	WARN(1, "Buffer overflow detected!\n");
-}
-EXPORT_SYMBOL(copy_from_user_overflow);

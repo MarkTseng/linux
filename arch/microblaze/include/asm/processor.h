@@ -22,7 +22,7 @@
 extern const struct seq_operations cpuinfo_op;
 
 # define cpu_relax()		barrier()
-# define cpu_sleep()		do {} while (0)
+# define cpu_relax_lowlatency()	cpu_relax()
 
 #define task_pt_regs(tsk) \
 		(((struct pt_regs *)(THREAD_SIZE + task_stack_page(tsk))) - 1)
@@ -67,11 +67,6 @@ struct thread_struct { };
 
 /* Free all resources held by a thread. */
 static inline void release_thread(struct task_struct *dead_task)
-{
-}
-
-/* Free all resources held by a thread. */
-static inline void exit_thread(void)
 {
 }
 
@@ -123,12 +118,7 @@ struct thread_struct {
 }
 
 /* Free all resources held by a thread. */
-extern inline void release_thread(struct task_struct *dead_task)
-{
-}
-
-/* Free current thread data structures etc.  */
-static inline void exit_thread(void)
+static inline void release_thread(struct task_struct *dead_task)
 {
 }
 
@@ -159,10 +149,6 @@ unsigned long get_wchan(struct task_struct *p);
 
 #  define STACK_TOP	TASK_SIZE
 #  define STACK_TOP_MAX	STACK_TOP
-
-void disable_hlt(void);
-void enable_hlt(void);
-void default_idle(void);
 
 #ifdef CONFIG_DEBUG_FS
 extern struct dentry *of_debugfs_root;

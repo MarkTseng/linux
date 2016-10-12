@@ -10,8 +10,8 @@
 #include <uapi/asm/e820.h>
 #ifndef __ASSEMBLY__
 /* see comment in arch/x86/kernel/e820.c */
-extern struct e820map e820;
-extern struct e820map e820_saved;
+extern struct e820map *e820;
+extern struct e820map *e820_saved;
 
 extern unsigned long pci_mem_start;
 extern int e820_any_mapped(u64 start, u64 end, unsigned type);
@@ -29,21 +29,13 @@ extern void e820_setup_gap(void);
 extern int e820_search_gap(unsigned long *gapstart, unsigned long *gapsize,
 			unsigned long start_addr, unsigned long long end_addr);
 struct setup_data;
-extern void parse_e820_ext(struct setup_data *data);
+extern void parse_e820_ext(u64 phys_addr, u32 data_len);
 
 #if defined(CONFIG_X86_64) || \
 	(defined(CONFIG_X86_32) && defined(CONFIG_HIBERNATION))
 extern void e820_mark_nosave_regions(unsigned long limit_pfn);
 #else
 static inline void e820_mark_nosave_regions(unsigned long limit_pfn)
-{
-}
-#endif
-
-#ifdef CONFIG_MEMTEST
-extern void early_memtest(unsigned long start, unsigned long end);
-#else
-static inline void early_memtest(unsigned long start, unsigned long end)
 {
 }
 #endif
@@ -60,6 +52,8 @@ extern void e820_reserve_resources(void);
 extern void e820_reserve_resources_late(void);
 extern void setup_memory_map(void);
 extern char *default_machine_specific_memory_setup(void);
+
+extern void e820_reallocate_tables(void);
 
 /*
  * Returns true iff the specified range [s,e) is completely contained inside

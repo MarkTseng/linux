@@ -95,10 +95,8 @@ static int sd_start(struct gspca_dev *gspca_dev)
 #define SD_NPKT 32
 	for (n = 0; n < 4; n++) {
 		urb = usb_alloc_urb(SD_NPKT, GFP_KERNEL);
-		if (!urb) {
-			pr_err("usb_alloc_urb failed\n");
+		if (!urb)
 			return -ENOMEM;
-		}
 		gspca_dev->urb[n] = urb;
 		urb->transfer_buffer = usb_alloc_coherent(gspca_dev->dev,
 						SD_PKT_SZ * SD_NPKT,
@@ -186,7 +184,7 @@ static void sd_isoc_irq(struct urb *urb)
 		/* check the packet status and length */
 		if (urb0->iso_frame_desc[i].actual_length != SD_PKT_SZ
 		    || urb->iso_frame_desc[i].actual_length != SD_PKT_SZ) {
-			PDEBUG(D_ERR, "ISOC bad lengths %d / %d",
+			PERR("ISOC bad lengths %d / %d",
 				urb0->iso_frame_desc[i].actual_length,
 				urb->iso_frame_desc[i].actual_length);
 			gspca_dev->last_packet_type = DISCARD_PACKET;
@@ -236,8 +234,8 @@ static void sd_isoc_irq(struct urb *urb)
 		}
 		data = (u8 *) urb->transfer_buffer
 					+ urb->iso_frame_desc[i].offset;
-			gspca_frame_add(gspca_dev, INTER_PACKET,
-					data, SD_PKT_SZ);
+		gspca_frame_add(gspca_dev, INTER_PACKET,
+				data, SD_PKT_SZ);
 	}
 
 	/* resubmit the URBs */

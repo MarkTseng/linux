@@ -15,11 +15,9 @@
 #define __ARCH_ARM_MACH_OMAP2_CLOCKDOMAIN_H
 
 #include <linux/init.h>
-#include <linux/spinlock.h>
 
 #include "powerdomain.h"
 #include "clock.h"
-#include "omap_hwmod.h"
 
 /*
  * Clockdomain flags
@@ -92,12 +90,14 @@ struct clkdm_autodep {
 struct clkdm_dep {
 	const char *clkdm_name;
 	struct clockdomain *clkdm;
-	atomic_t wkdep_usecount;
-	atomic_t sleepdep_usecount;
+	s16 wkdep_usecount;
+	s16 sleepdep_usecount;
 };
 
 /* Possible flags for struct clockdomain._flags */
 #define _CLKDM_FLAG_HWSUP_ENABLED		BIT(0)
+
+struct omap_hwmod;
 
 /**
  * struct clockdomain - OMAP clockdomain
@@ -114,6 +114,7 @@ struct clkdm_dep {
  * @wkdep_srcs: Clockdomains that can be told to wake this powerdomain up
  * @sleepdep_srcs: Clockdomains that can be told to keep this clkdm from inact
  * @usecount: Usecount tracking
+ * @forcewake_count: Usecount for forcing the domain active
  * @node: list_head to link all clockdomains together
  *
  * @prcm_partition should be a macro from mach-omap2/prcm44xx.h (OMAP4 only)
@@ -133,13 +134,13 @@ struct clockdomain {
 	u8 _flags;
 	const u8 dep_bit;
 	const u8 prcm_partition;
-	const s16 cm_inst;
+	const u16 cm_inst;
 	const u16 clkdm_offs;
 	struct clkdm_dep *wkdep_srcs;
 	struct clkdm_dep *sleepdep_srcs;
-	atomic_t usecount;
+	int usecount;
+	int forcewake_count;
 	struct list_head node;
-	spinlock_t lock;
 };
 
 /**
@@ -196,12 +197,16 @@ int clkdm_del_sleepdep(struct clockdomain *clkdm1, struct clockdomain *clkdm2);
 int clkdm_read_sleepdep(struct clockdomain *clkdm1, struct clockdomain *clkdm2);
 int clkdm_clear_all_sleepdeps(struct clockdomain *clkdm);
 
+void clkdm_allow_idle_nolock(struct clockdomain *clkdm);
 void clkdm_allow_idle(struct clockdomain *clkdm);
+void clkdm_deny_idle_nolock(struct clockdomain *clkdm);
 void clkdm_deny_idle(struct clockdomain *clkdm);
 bool clkdm_in_hwsup(struct clockdomain *clkdm);
 bool clkdm_missing_idle_reporting(struct clockdomain *clkdm);
 
+int clkdm_wakeup_nolock(struct clockdomain *clkdm);
 int clkdm_wakeup(struct clockdomain *clkdm);
+int clkdm_sleep_nolock(struct clockdomain *clkdm);
 int clkdm_sleep(struct clockdomain *clkdm);
 
 int clkdm_clk_enable(struct clockdomain *clkdm, struct clk *clk);
@@ -213,14 +218,21 @@ extern void __init omap242x_clockdomains_init(void);
 extern void __init omap243x_clockdomains_init(void);
 extern void __init omap3xxx_clockdomains_init(void);
 extern void __init am33xx_clockdomains_init(void);
+extern void __init ti814x_clockdomains_init(void);
+extern void __init ti816x_clockdomains_init(void);
 extern void __init omap44xx_clockdomains_init(void);
-extern void _clkdm_add_autodeps(struct clockdomain *clkdm);
-extern void _clkdm_del_autodeps(struct clockdomain *clkdm);
+extern void __init omap54xx_clockdomains_init(void);
+extern void __init dra7xx_clockdomains_init(void);
+void am43xx_clockdomains_init(void);
+
+extern void clkdm_add_autodeps(struct clockdomain *clkdm);
+extern void clkdm_del_autodeps(struct clockdomain *clkdm);
 
 extern struct clkdm_ops omap2_clkdm_operations;
 extern struct clkdm_ops omap3_clkdm_operations;
 extern struct clkdm_ops omap4_clkdm_operations;
 extern struct clkdm_ops am33xx_clkdm_operations;
+extern struct clkdm_ops am43xx_clkdm_operations;
 
 extern struct clkdm_dep gfx_24xx_wkdeps[];
 extern struct clkdm_dep dsp_24xx_wkdeps[];

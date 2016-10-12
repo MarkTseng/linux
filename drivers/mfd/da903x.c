@@ -2,10 +2,10 @@
  * Base driver for Dialog Semiconductor DA9030/DA9034
  *
  * Copyright (C) 2008 Compulab, Ltd.
- * 	Mike Rapoport <mike@compulab.co.il>
+ *	Mike Rapoport <mike@compulab.co.il>
  *
  * Copyright (C) 2006-2008 Marvell International Ltd.
- * 	Eric Miao <eric.miao@marvell.com>
+ *	Eric Miao <eric.miao@marvell.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -60,7 +60,7 @@ struct da903x_chip_ops {
 struct da903x_chip {
 	struct i2c_client	*client;
 	struct device		*dev;
-	struct da903x_chip_ops	*ops;
+	const struct da903x_chip_ops *ops;
 
 	int			type;
 	uint32_t		events_mask;
@@ -424,7 +424,7 @@ static irqreturn_t da903x_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static struct da903x_chip_ops da903x_ops[] = {
+static const struct da903x_chip_ops da903x_ops[] = {
 	[0] = {
 		.init_chip	= da9030_init_chip,
 		.unmask_events	= da9030_unmask_events,
@@ -494,12 +494,13 @@ failed:
 static int da903x_probe(struct i2c_client *client,
 				  const struct i2c_device_id *id)
 {
-	struct da903x_platform_data *pdata = client->dev.platform_data;
+	struct da903x_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct da903x_chip *chip;
 	unsigned int tmp;
 	int ret;
 
-	chip = kzalloc(sizeof(struct da903x_chip), GFP_KERNEL);
+	chip = devm_kzalloc(&client->dev, sizeof(struct da903x_chip),
+				GFP_KERNEL);
 	if (chip == NULL)
 		return -ENOMEM;
 
@@ -515,33 +516,23 @@ static int da903x_probe(struct i2c_client *client,
 
 	ret = chip->ops->init_chip(chip);
 	if (ret)
-		goto out_free_chip;
+		return ret;
 
 	/* mask and clear all IRQs */
 	chip->events_mask = 0xffffffff;
 	chip->ops->mask_events(chip, chip->events_mask);
 	chip->ops->read_events(chip, &tmp);
 
-	ret = request_irq(client->irq, da903x_irq_handler,
+	ret = devm_request_irq(&client->dev, client->irq, da903x_irq_handler,
 			IRQF_TRIGGER_FALLING,
 			"da903x", chip);
 	if (ret) {
 		dev_err(&client->dev, "failed to request irq %d\n",
 				client->irq);
-		goto out_free_chip;
+		return ret;
 	}
 
-	ret = da903x_add_subdevs(chip, pdata);
-	if (ret)
-		goto out_free_irq;
-
-	return 0;
-
-out_free_irq:
-	free_irq(client->irq, chip);
-out_free_chip:
-	kfree(chip);
-	return ret;
+	return da903x_add_subdevs(chip, pdata);
 }
 
 static int da903x_remove(struct i2c_client *client)
@@ -549,15 +540,12 @@ static int da903x_remove(struct i2c_client *client)
 	struct da903x_chip *chip = i2c_get_clientdata(client);
 
 	da903x_remove_subdevs(chip);
-	free_irq(client->irq, chip);
-	kfree(chip);
 	return 0;
 }
 
 static struct i2c_driver da903x_driver = {
 	.driver	= {
 		.name	= "da903x",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= da903x_probe,
 	.remove		= da903x_remove,
@@ -577,6 +565,6 @@ static void __exit da903x_exit(void)
 module_exit(da903x_exit);
 
 MODULE_DESCRIPTION("PMIC Driver for Dialog Semiconductor DA9034");
-MODULE_AUTHOR("Eric Miao <eric.miao@marvell.com>"
-	      "Mike Rapoport <mike@compulab.co.il>");
-MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Eric Miao <eric.miao@marvell.com>");
+MODULE_AUTHOR("Mike Rapoport <mike@compulab.co.il>");
+MODULE_LICENSE("GPL v2");

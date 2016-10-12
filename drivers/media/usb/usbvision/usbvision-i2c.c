@@ -189,8 +189,7 @@ int usbvision_i2c_register(struct usb_usbvision *usbvision)
 	if (usbvision->registered_i2c)
 		return 0;
 
-	memcpy(&usbvision->i2c_adap, &i2c_adap_template,
-	       sizeof(struct i2c_adapter));
+	usbvision->i2c_adap = i2c_adap_template;
 
 	sprintf(usbvision->i2c_adap.name, "%s-%d-%s", i2c_adap_template.name,
 		usbvision->dev->bus->busnum, usbvision->dev->devpath);
@@ -344,7 +343,7 @@ static int usbvision_i2c_write_max4(struct usb_usbvision *usbvision,
 {
 	int rc, retries;
 	int i;
-	unsigned char value[6];
+	unsigned char *value = usbvision->ctrl_urb_buffer;
 	unsigned char ser_cont;
 
 	ser_cont = (len & 0x07) | 0x10;
@@ -446,11 +445,3 @@ static struct i2c_adapter i2c_adap_template = {
 	.owner = THIS_MODULE,
 	.name              = "usbvision",
 };
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-basic-offset: 8
- * End:
- */

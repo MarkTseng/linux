@@ -123,7 +123,7 @@ omap_otg_init(struct omap_usb_config *config)
 	syscon = omap_readl(OTG_SYSCON_1);
 	syscon |= HST_IDLE_EN|DEV_IDLE_EN|OTG_IDLE_EN;
 
-#ifdef	CONFIG_USB_GADGET_OMAP
+#if IS_ENABLED(CONFIG_USB_OMAP)
 	if (config->otg || config->register_dev) {
 		struct platform_device *udc_device = config->udc_device;
 		int status;
@@ -136,7 +136,7 @@ omap_otg_init(struct omap_usb_config *config)
 	}
 #endif
 
-#if	defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
+#if	IS_ENABLED(CONFIG_USB_OHCI_HCD)
 	if (config->otg || config->register_host) {
 		struct platform_device *ohci_device = config->ohci_device;
 		int status;
@@ -169,7 +169,7 @@ omap_otg_init(struct omap_usb_config *config)
 void omap_otg_init(struct omap_usb_config *config) {}
 #endif
 
-#ifdef	CONFIG_USB_GADGET_OMAP
+#if IS_ENABLED(CONFIG_USB_OMAP)
 
 static struct resource udc_resources[] = {
 	/* order is significant! */
@@ -221,7 +221,7 @@ static inline void udc_device_init(struct omap_usb_config *pdata)
 
 #endif
 
-#if	defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
+#if	IS_ENABLED(CONFIG_USB_OHCI_HCD)
 
 /* The dmamask must be set for OHCI to work */
 static u64 ohci_dmamask = ~(u32)0;
@@ -600,7 +600,7 @@ static void __init omap_1510_usb_init(struct omap_usb_config *config)
 	while (!(omap_readw(ULPD_DPLL_CTRL) & DPLL_LOCK))
 		cpu_relax();
 
-#ifdef	CONFIG_USB_GADGET_OMAP
+#if IS_ENABLED(CONFIG_USB_OMAP)
 	if (config->register_dev) {
 		int status;
 
@@ -612,7 +612,7 @@ static void __init omap_1510_usb_init(struct omap_usb_config *config)
 	}
 #endif
 
-#if	defined(CONFIG_USB_OHCI_HCD) || defined(CONFIG_USB_OHCI_HCD_MODULE)
+#if	IS_ENABLED(CONFIG_USB_OHCI_HCD)
 	if (config->register_host) {
 		int status;
 

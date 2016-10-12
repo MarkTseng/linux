@@ -25,60 +25,34 @@
 #include <linux/irq.h>
 #include <linux/smp.h>
 #include <linux/init.h>
-#include <linux/of_irq.h>
+#include <linux/irqchip.h>
 #include <linux/seq_file.h>
-#include <linux/ratelimit.h>
 
 unsigned long irq_err_count;
 
+/* irq stack only needs to be 16 byte aligned - not IRQ_STACK_SIZE aligned. */
+DEFINE_PER_CPU(unsigned long [IRQ_STACK_SIZE/sizeof(long)], irq_stack) __aligned(16);
+
 int arch_show_interrupts(struct seq_file *p, int prec)
 {
-#ifdef CONFIG_SMP
 	show_ipi_list(p, prec);
-#endif
 	seq_printf(p, "%*s: %10lu\n", prec, "Err", irq_err_count);
 	return 0;
 }
 
-/*
- * handle_IRQ handles all hardware IRQ's.  Decoded IRQs should
- * not come via this function.  Instead, they should provide their
- * own 'handler'.  Used by platform code implementing C-based 1st
- * level decoding.
- */
-void handle_IRQ(unsigned int irq, struct pt_regs *regs)
+void (*handle_arch_irq)(struct pt_regs *) = NULL;
+
+void __init set_handle_irq(void (*handle_irq)(struct pt_regs *))
 {
-	struct pt_regs *old_regs = set_irq_regs(regs);
+	if (handle_arch_irq)
+		return;
 
-	irq_enter();
-
-	/*
-	 * Some hardware gives randomly wrong interrupts.  Rather
-	 * than crashing, do something sensible.
-	 */
-	if (unlikely(irq >= nr_irqs)) {
-		pr_warn_ratelimited("Bad IRQ%u\n", irq);
-		ack_bad_irq(irq);
-	} else {
-		generic_handle_irq(irq);
-	}
-
-	irq_exit();
-	set_irq_regs(old_regs);
+	handle_arch_irq = handle_irq;
 }
-
-/*
- * Interrupt controllers supported by the kernel.
- */
-static const struct of_device_id intctrl_of_match[] __initconst = {
-	/* IRQ controllers { .compatible, .data } info to go here */
-	{}
-};
 
 void __init init_IRQ(void)
 {
-	of_irq_init(intctrl_of_match);
-
+	irqchip_init();
 	if (!handle_arch_irq)
 		panic("No interrupt controller found.");
 }

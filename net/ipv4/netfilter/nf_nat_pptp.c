@@ -13,6 +13,8 @@
  *
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  *
+ * (C) 2006-2012 Patrick McHardy <kaber@trash.net>
+ *
  * TODO: - NAT to a unique tuple, not to TCP source port
  * 	   (needs netfilter tuple reservation)
  */
@@ -43,7 +45,7 @@ static void pptp_nat_expected(struct nf_conn *ct,
 	struct net *net = nf_ct_net(ct);
 	const struct nf_conn *master = ct->master;
 	struct nf_conntrack_expect *other_exp;
-	struct nf_conntrack_tuple t;
+	struct nf_conntrack_tuple t = {};
 	const struct nf_ct_pptp_master *ct_pptp_info;
 	const struct nf_nat_pptp *nat_pptp_info;
 	struct nf_nat_range range;

@@ -34,52 +34,40 @@
 #define OFFSETB(x)		(((x) - dev->bank2) >> MFC_OFFSET_SHIFT)
 
 /* Allocate temporary buffers for decoding */
-int s5p_mfc_alloc_dec_temp_buffers_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_alloc_dec_temp_buffers_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf_size_v5 *buf_size = dev->variant->buf_size->priv;
+	int ret;
 
-	ctx->dsc.alloc = vb2_dma_contig_memops.alloc(
-			dev->alloc_ctx[MFC_BANK1_ALLOC_CTX],
-			buf_size->dsc);
-	if (IS_ERR_VALUE((int)ctx->dsc.alloc)) {
-		ctx->dsc.alloc = NULL;
-		mfc_err("Allocating DESC buffer failed\n");
-		return -ENOMEM;
+	ctx->dsc.size = buf_size->dsc;
+	ret =  s5p_mfc_alloc_priv_buf(dev->mem_dev_l, dev->bank1, &ctx->dsc);
+	if (ret) {
+		mfc_err("Failed to allocate temporary buffer\n");
+		return ret;
 	}
-	ctx->dsc.dma = s5p_mfc_mem_cookie(
-			dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], ctx->dsc.alloc);
+
 	BUG_ON(ctx->dsc.dma & ((1 << MFC_BANK1_ALIGN_ORDER) - 1));
-	ctx->dsc.virt = vb2_dma_contig_memops.vaddr(ctx->dsc.alloc);
-	if (ctx->dsc.virt == NULL) {
-		vb2_dma_contig_memops.put(ctx->dsc.alloc);
-		ctx->dsc.dma = 0;
-		ctx->dsc.alloc = NULL;
-		mfc_err("Remapping DESC buffer failed\n");
-		return -ENOMEM;
-	}
-	memset(ctx->dsc.virt, 0, buf_size->dsc);
+	memset(ctx->dsc.virt, 0, ctx->dsc.size);
 	wmb();
 	return 0;
 }
 
+
 /* Release temporary buffers for decoding */
-void s5p_mfc_release_dec_desc_buffer_v5(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_release_dec_desc_buffer_v5(struct s5p_mfc_ctx *ctx)
 {
-	if (ctx->dsc.dma) {
-		vb2_dma_contig_memops.put(ctx->dsc.alloc);
-		ctx->dsc.alloc = NULL;
-		ctx->dsc.dma = 0;
-	}
+	s5p_mfc_release_priv_buf(ctx->dev->mem_dev_l, &ctx->dsc);
 }
 
 /* Allocate codec buffers */
-int s5p_mfc_alloc_codec_buffers_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_alloc_codec_buffers_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	unsigned int enc_ref_y_size = 0;
 	unsigned int enc_ref_c_size = 0;
 	unsigned int guard_width, guard_height;
+	int ret;
 
 	if (ctx->type == MFCINST_DECODER) {
 		mfc_debug(2, "Luma size:%d Chroma size:%d MV size:%d\n",
@@ -113,208 +101,163 @@ int s5p_mfc_alloc_codec_buffers_v5(struct s5p_mfc_ctx *ctx)
 	/* Codecs have different memory requirements */
 	switch (ctx->codec_mode) {
 	case S5P_MFC_CODEC_H264_DEC:
-		ctx->bank1_size =
+		ctx->bank1.size =
 		    ALIGN(S5P_FIMV_DEC_NB_IP_SIZE +
 					S5P_FIMV_DEC_VERT_NB_MV_SIZE,
 					S5P_FIMV_DEC_BUF_ALIGN);
-		ctx->bank2_size = ctx->total_dpb_count * ctx->mv_size;
+		ctx->bank2.size = ctx->total_dpb_count * ctx->mv_size;
 		break;
 	case S5P_MFC_CODEC_MPEG4_DEC:
-		ctx->bank1_size =
+		ctx->bank1.size =
 		    ALIGN(S5P_FIMV_DEC_NB_DCAC_SIZE +
 				     S5P_FIMV_DEC_UPNB_MV_SIZE +
 				     S5P_FIMV_DEC_SUB_ANCHOR_MV_SIZE +
 				     S5P_FIMV_DEC_STX_PARSER_SIZE +
 				     S5P_FIMV_DEC_OVERLAP_TRANSFORM_SIZE,
 				     S5P_FIMV_DEC_BUF_ALIGN);
-		ctx->bank2_size = 0;
+		ctx->bank2.size = 0;
 		break;
 	case S5P_MFC_CODEC_VC1RCV_DEC:
 	case S5P_MFC_CODEC_VC1_DEC:
-		ctx->bank1_size =
+		ctx->bank1.size =
 		    ALIGN(S5P_FIMV_DEC_OVERLAP_TRANSFORM_SIZE +
 			     S5P_FIMV_DEC_UPNB_MV_SIZE +
 			     S5P_FIMV_DEC_SUB_ANCHOR_MV_SIZE +
 			     S5P_FIMV_DEC_NB_DCAC_SIZE +
 			     3 * S5P_FIMV_DEC_VC1_BITPLANE_SIZE,
 			     S5P_FIMV_DEC_BUF_ALIGN);
-		ctx->bank2_size = 0;
+		ctx->bank2.size = 0;
 		break;
 	case S5P_MFC_CODEC_MPEG2_DEC:
-		ctx->bank1_size = 0;
-		ctx->bank2_size = 0;
+		ctx->bank1.size = 0;
+		ctx->bank2.size = 0;
 		break;
 	case S5P_MFC_CODEC_H263_DEC:
-		ctx->bank1_size =
+		ctx->bank1.size =
 		    ALIGN(S5P_FIMV_DEC_OVERLAP_TRANSFORM_SIZE +
 			     S5P_FIMV_DEC_UPNB_MV_SIZE +
 			     S5P_FIMV_DEC_SUB_ANCHOR_MV_SIZE +
 			     S5P_FIMV_DEC_NB_DCAC_SIZE,
 			     S5P_FIMV_DEC_BUF_ALIGN);
-		ctx->bank2_size = 0;
+		ctx->bank2.size = 0;
 		break;
 	case S5P_MFC_CODEC_H264_ENC:
-		ctx->bank1_size = (enc_ref_y_size * 2) +
+		ctx->bank1.size = (enc_ref_y_size * 2) +
 				   S5P_FIMV_ENC_UPMV_SIZE +
 				   S5P_FIMV_ENC_COLFLG_SIZE +
 				   S5P_FIMV_ENC_INTRAMD_SIZE +
 				   S5P_FIMV_ENC_NBORINFO_SIZE;
-		ctx->bank2_size = (enc_ref_y_size * 2) +
+		ctx->bank2.size = (enc_ref_y_size * 2) +
 				   (enc_ref_c_size * 4) +
 				   S5P_FIMV_ENC_INTRAPRED_SIZE;
 		break;
 	case S5P_MFC_CODEC_MPEG4_ENC:
-		ctx->bank1_size = (enc_ref_y_size * 2) +
+		ctx->bank1.size = (enc_ref_y_size * 2) +
 				   S5P_FIMV_ENC_UPMV_SIZE +
 				   S5P_FIMV_ENC_COLFLG_SIZE +
 				   S5P_FIMV_ENC_ACDCCOEF_SIZE;
-		ctx->bank2_size = (enc_ref_y_size * 2) +
+		ctx->bank2.size = (enc_ref_y_size * 2) +
 				   (enc_ref_c_size * 4);
 		break;
 	case S5P_MFC_CODEC_H263_ENC:
-		ctx->bank1_size = (enc_ref_y_size * 2) +
+		ctx->bank1.size = (enc_ref_y_size * 2) +
 				   S5P_FIMV_ENC_UPMV_SIZE +
 				   S5P_FIMV_ENC_ACDCCOEF_SIZE;
-		ctx->bank2_size = (enc_ref_y_size * 2) +
+		ctx->bank2.size = (enc_ref_y_size * 2) +
 				   (enc_ref_c_size * 4);
 		break;
 	default:
 		break;
 	}
 	/* Allocate only if memory from bank 1 is necessary */
-	if (ctx->bank1_size > 0) {
-		ctx->bank1_buf = vb2_dma_contig_memops.alloc(
-		dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], ctx->bank1_size);
-		if (IS_ERR(ctx->bank1_buf)) {
-			ctx->bank1_buf = NULL;
-			printk(KERN_ERR
-			       "Buf alloc for decoding failed (port A)\n");
-			return -ENOMEM;
+	if (ctx->bank1.size > 0) {
+
+		ret = s5p_mfc_alloc_priv_buf(dev->mem_dev_l, dev->bank1,
+					     &ctx->bank1);
+		if (ret) {
+			mfc_err("Failed to allocate Bank1 temporary buffer\n");
+			return ret;
 		}
-		ctx->bank1_phys = s5p_mfc_mem_cookie(
-		dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], ctx->bank1_buf);
-		BUG_ON(ctx->bank1_phys & ((1 << MFC_BANK1_ALIGN_ORDER) - 1));
+		BUG_ON(ctx->bank1.dma & ((1 << MFC_BANK1_ALIGN_ORDER) - 1));
 	}
 	/* Allocate only if memory from bank 2 is necessary */
-	if (ctx->bank2_size > 0) {
-		ctx->bank2_buf = vb2_dma_contig_memops.alloc(
-		dev->alloc_ctx[MFC_BANK2_ALLOC_CTX], ctx->bank2_size);
-		if (IS_ERR(ctx->bank2_buf)) {
-			ctx->bank2_buf = NULL;
-			mfc_err("Buf alloc for decoding failed (port B)\n");
-			return -ENOMEM;
+	if (ctx->bank2.size > 0) {
+		ret = s5p_mfc_alloc_priv_buf(dev->mem_dev_r, dev->bank2,
+					     &ctx->bank2);
+		if (ret) {
+			mfc_err("Failed to allocate Bank2 temporary buffer\n");
+			s5p_mfc_release_priv_buf(ctx->dev->mem_dev_l, &ctx->bank1);
+			return ret;
 		}
-		ctx->bank2_phys = s5p_mfc_mem_cookie(
-		dev->alloc_ctx[MFC_BANK2_ALLOC_CTX], ctx->bank2_buf);
-		BUG_ON(ctx->bank2_phys & ((1 << MFC_BANK2_ALIGN_ORDER) - 1));
+		BUG_ON(ctx->bank2.dma & ((1 << MFC_BANK2_ALIGN_ORDER) - 1));
 	}
 	return 0;
 }
 
 /* Release buffers allocated for codec */
-void s5p_mfc_release_codec_buffers_v5(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_release_codec_buffers_v5(struct s5p_mfc_ctx *ctx)
 {
-	if (ctx->bank1_buf) {
-		vb2_dma_contig_memops.put(ctx->bank1_buf);
-		ctx->bank1_buf = NULL;
-		ctx->bank1_phys = 0;
-		ctx->bank1_size = 0;
-	}
-	if (ctx->bank2_buf) {
-		vb2_dma_contig_memops.put(ctx->bank2_buf);
-		ctx->bank2_buf = NULL;
-		ctx->bank2_phys = 0;
-		ctx->bank2_size = 0;
-	}
+	s5p_mfc_release_priv_buf(ctx->dev->mem_dev_l, &ctx->bank1);
+	s5p_mfc_release_priv_buf(ctx->dev->mem_dev_r, &ctx->bank2);
 }
 
 /* Allocate memory for instance data buffer */
-int s5p_mfc_alloc_instance_buffer_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_alloc_instance_buffer_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf_size_v5 *buf_size = dev->variant->buf_size->priv;
+	int ret;
 
 	if (ctx->codec_mode == S5P_MFC_CODEC_H264_DEC ||
 		ctx->codec_mode == S5P_MFC_CODEC_H264_ENC)
 		ctx->ctx.size = buf_size->h264_ctx;
 	else
 		ctx->ctx.size = buf_size->non_h264_ctx;
-	ctx->ctx.alloc = vb2_dma_contig_memops.alloc(
-		dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], ctx->ctx.size);
-	if (IS_ERR(ctx->ctx.alloc)) {
-		mfc_err("Allocating context buffer failed\n");
-		ctx->ctx.alloc = NULL;
-		return -ENOMEM;
+
+	ret = s5p_mfc_alloc_priv_buf(dev->mem_dev_l, dev->bank1, &ctx->ctx);
+	if (ret) {
+		mfc_err("Failed to allocate instance buffer\n");
+		return ret;
 	}
-	ctx->ctx.dma = s5p_mfc_mem_cookie(
-		dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], ctx->ctx.alloc);
-	BUG_ON(ctx->ctx.dma & ((1 << MFC_BANK1_ALIGN_ORDER) - 1));
 	ctx->ctx.ofs = OFFSETA(ctx->ctx.dma);
-	ctx->ctx.virt = vb2_dma_contig_memops.vaddr(ctx->ctx.alloc);
-	if (!ctx->ctx.virt) {
-		mfc_err("Remapping instance buffer failed\n");
-		vb2_dma_contig_memops.put(ctx->ctx.alloc);
-		ctx->ctx.alloc = NULL;
-		ctx->ctx.ofs = 0;
-		ctx->ctx.dma = 0;
-		return -ENOMEM;
-	}
+
 	/* Zero content of the allocated memory */
 	memset(ctx->ctx.virt, 0, ctx->ctx.size);
 	wmb();
 
 	/* Initialize shared memory */
-	ctx->shm.alloc = vb2_dma_contig_memops.alloc(
-			dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], buf_size->shm);
-	if (IS_ERR(ctx->shm.alloc)) {
-		mfc_err("failed to allocate shared memory\n");
-		return PTR_ERR(ctx->shm.alloc);
+	ctx->shm.size = buf_size->shm;
+	ret = s5p_mfc_alloc_priv_buf(dev->mem_dev_l, dev->bank1, &ctx->shm);
+	if (ret) {
+		mfc_err("Failed to allocate shared memory buffer\n");
+		s5p_mfc_release_priv_buf(dev->mem_dev_l, &ctx->ctx);
+		return ret;
 	}
+
 	/* shared memory offset only keeps the offset from base (port a) */
-	ctx->shm.ofs = s5p_mfc_mem_cookie(
-			dev->alloc_ctx[MFC_BANK1_ALLOC_CTX], ctx->shm.alloc)
-								- dev->bank1;
+	ctx->shm.ofs = ctx->shm.dma - dev->bank1;
 	BUG_ON(ctx->shm.ofs & ((1 << MFC_BANK1_ALIGN_ORDER) - 1));
 
-	ctx->shm.virt = vb2_dma_contig_memops.vaddr(ctx->shm.alloc);
-	if (!ctx->shm.virt) {
-		vb2_dma_contig_memops.put(ctx->shm.alloc);
-		ctx->shm.alloc = NULL;
-		ctx->shm.ofs = 0;
-		mfc_err("failed to virt addr of shared memory\n");
-		return -ENOMEM;
-	}
-	memset((void *)ctx->shm.virt, 0, buf_size->shm);
+	memset(ctx->shm.virt, 0, buf_size->shm);
 	wmb();
 	return 0;
 }
 
 /* Release instance buffer */
-void s5p_mfc_release_instance_buffer_v5(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_release_instance_buffer_v5(struct s5p_mfc_ctx *ctx)
 {
-	if (ctx->ctx.alloc) {
-		vb2_dma_contig_memops.put(ctx->ctx.alloc);
-		ctx->ctx.alloc = NULL;
-		ctx->ctx.ofs = 0;
-		ctx->ctx.virt = NULL;
-		ctx->ctx.dma = 0;
-	}
-	if (ctx->shm.alloc) {
-		vb2_dma_contig_memops.put(ctx->shm.alloc);
-		ctx->shm.alloc = NULL;
-		ctx->shm.ofs = 0;
-		ctx->shm.virt = NULL;
-	}
+	s5p_mfc_release_priv_buf(ctx->dev->mem_dev_l, &ctx->ctx);
+	s5p_mfc_release_priv_buf(ctx->dev->mem_dev_l, &ctx->shm);
 }
 
-int s5p_mfc_alloc_dev_context_buffer_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_alloc_dev_context_buffer_v5(struct s5p_mfc_dev *dev)
 {
 	/* NOP */
 
 	return 0;
 }
 
-void s5p_mfc_release_dev_context_buffer_v5(struct s5p_mfc_dev *dev)
+static void s5p_mfc_release_dev_context_buffer_v5(struct s5p_mfc_dev *dev)
 {
 	/* NOP */
 }
@@ -322,18 +265,18 @@ void s5p_mfc_release_dev_context_buffer_v5(struct s5p_mfc_dev *dev)
 static void s5p_mfc_write_info_v5(struct s5p_mfc_ctx *ctx, unsigned int data,
 			unsigned int ofs)
 {
-	writel(data, (ctx->shm.virt + ofs));
+	*(u32 *)(ctx->shm.virt + ofs) = data;
 	wmb();
 }
 
 static unsigned int s5p_mfc_read_info_v5(struct s5p_mfc_ctx *ctx,
-				unsigned int ofs)
+				unsigned long ofs)
 {
 	rmb();
-	return readl(ctx->shm.virt + ofs);
+	return *(u32 *)(ctx->shm.virt + ofs);
 }
 
-void s5p_mfc_dec_calc_dpb_size_v5(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_dec_calc_dpb_size_v5(struct s5p_mfc_ctx *ctx)
 {
 	unsigned int guard_width, guard_height;
 
@@ -375,7 +318,7 @@ void s5p_mfc_dec_calc_dpb_size_v5(struct s5p_mfc_ctx *ctx)
 	}
 }
 
-void s5p_mfc_enc_calc_src_size_v5(struct s5p_mfc_ctx *ctx)
+static void s5p_mfc_enc_calc_src_size_v5(struct s5p_mfc_ctx *ctx)
 {
 	if (ctx->src_fmt->fourcc == V4L2_PIX_FMT_NV12M) {
 		ctx->buf_width = ALIGN(ctx->img_width, S5P_FIMV_NV12M_HALIGN);
@@ -421,8 +364,9 @@ static void s5p_mfc_set_shared_buffer(struct s5p_mfc_ctx *ctx)
 }
 
 /* Set registers for decoding stream buffer */
-int s5p_mfc_set_dec_stream_buffer_v5(struct s5p_mfc_ctx *ctx, int buf_addr,
-		  unsigned int start_num_byte, unsigned int buf_size)
+static int s5p_mfc_set_dec_stream_buffer_v5(struct s5p_mfc_ctx *ctx,
+		int buf_addr, unsigned int start_num_byte,
+		unsigned int buf_size)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
@@ -434,19 +378,19 @@ int s5p_mfc_set_dec_stream_buffer_v5(struct s5p_mfc_ctx *ctx, int buf_addr,
 }
 
 /* Set decoding frame buffer */
-int s5p_mfc_set_dec_frame_buffer_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_set_dec_frame_buffer_v5(struct s5p_mfc_ctx *ctx)
 {
-	unsigned int frame_size, i;
+	unsigned int frame_size_lu, i;
 	unsigned int frame_size_ch, frame_size_mv;
 	struct s5p_mfc_dev *dev = ctx->dev;
 	unsigned int dpb;
 	size_t buf_addr1, buf_addr2;
 	int buf_size1, buf_size2;
 
-	buf_addr1 = ctx->bank1_phys;
-	buf_size1 = ctx->bank1_size;
-	buf_addr2 = ctx->bank2_phys;
-	buf_size2 = ctx->bank2_size;
+	buf_addr1 = ctx->bank1.dma;
+	buf_size1 = ctx->bank1.size;
+	buf_addr2 = ctx->bank2.dma;
+	buf_size2 = ctx->bank2.size;
 	dpb = mfc_read(dev, S5P_FIMV_SI_CH0_DPB_CONF_CTRL) &
 						~S5P_FIMV_DPB_COUNT_MASK;
 	mfc_write(dev, ctx->total_dpb_count | dpb,
@@ -523,25 +467,24 @@ int s5p_mfc_set_dec_frame_buffer_v5(struct s5p_mfc_ctx *ctx)
 		mfc_err("Unknown codec for decoding (%x)\n",
 			ctx->codec_mode);
 		return -EINVAL;
-		break;
 	}
-	frame_size = ctx->luma_size;
+	frame_size_lu = ctx->luma_size;
 	frame_size_ch = ctx->chroma_size;
 	frame_size_mv = ctx->mv_size;
-	mfc_debug(2, "Frm size: %d ch: %d mv: %d\n", frame_size, frame_size_ch,
+	mfc_debug(2, "Frm size: %d ch: %d mv: %d\n", frame_size_lu, frame_size_ch,
 								frame_size_mv);
 	for (i = 0; i < ctx->total_dpb_count; i++) {
 		/* Bank2 */
-		mfc_debug(2, "Luma %d: %x\n", i,
+		mfc_debug(2, "Luma %d: %zx\n", i,
 					ctx->dst_bufs[i].cookie.raw.luma);
 		mfc_write(dev, OFFSETB(ctx->dst_bufs[i].cookie.raw.luma),
 						S5P_FIMV_DEC_LUMA_ADR + i * 4);
-		mfc_debug(2, "\tChroma %d: %x\n", i,
+		mfc_debug(2, "\tChroma %d: %zx\n", i,
 					ctx->dst_bufs[i].cookie.raw.chroma);
 		mfc_write(dev, OFFSETA(ctx->dst_bufs[i].cookie.raw.chroma),
 					       S5P_FIMV_DEC_CHROMA_ADR + i * 4);
 		if (ctx->codec_mode == S5P_MFC_CODEC_H264_DEC) {
-			mfc_debug(2, "\tBuf2: %x, size: %d\n",
+			mfc_debug(2, "\tBuf2: %zx, size: %d\n",
 							buf_addr2, buf_size2);
 			mfc_write(dev, OFFSETB(buf_addr2),
 						S5P_FIMV_H264_MV_ADR + i * 4);
@@ -549,14 +492,14 @@ int s5p_mfc_set_dec_frame_buffer_v5(struct s5p_mfc_ctx *ctx)
 			buf_size2 -= frame_size_mv;
 		}
 	}
-	mfc_debug(2, "Buf1: %u, buf_size1: %d\n", buf_addr1, buf_size1);
+	mfc_debug(2, "Buf1: %zu, buf_size1: %d\n", buf_addr1, buf_size1);
 	mfc_debug(2, "Buf 1/2 size after: %d/%d (frames %d)\n",
 			buf_size1,  buf_size2, ctx->total_dpb_count);
 	if (buf_size1 < 0 || buf_size2 < 0) {
 		mfc_debug(2, "Not enough memory has been allocated\n");
 		return -ENOMEM;
 	}
-	s5p_mfc_write_info_v5(ctx, frame_size, ALLOC_LUMA_DPB_SIZE);
+	s5p_mfc_write_info_v5(ctx, frame_size_lu, ALLOC_LUMA_DPB_SIZE);
 	s5p_mfc_write_info_v5(ctx, frame_size_ch, ALLOC_CHROMA_DPB_SIZE);
 	if (ctx->codec_mode == S5P_MFC_CODEC_H264_DEC)
 		s5p_mfc_write_info_v5(ctx, frame_size_mv, ALLOC_MV_SIZE);
@@ -567,7 +510,7 @@ int s5p_mfc_set_dec_frame_buffer_v5(struct s5p_mfc_ctx *ctx)
 }
 
 /* Set registers for encoding stream buffer */
-int s5p_mfc_set_enc_stream_buffer_v5(struct s5p_mfc_ctx *ctx,
+static int s5p_mfc_set_enc_stream_buffer_v5(struct s5p_mfc_ctx *ctx,
 		unsigned long addr, unsigned int size)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
@@ -577,7 +520,7 @@ int s5p_mfc_set_enc_stream_buffer_v5(struct s5p_mfc_ctx *ctx,
 	return 0;
 }
 
-void s5p_mfc_set_enc_frame_buffer_v5(struct s5p_mfc_ctx *ctx,
+static void s5p_mfc_set_enc_frame_buffer_v5(struct s5p_mfc_ctx *ctx,
 		unsigned long y_addr, unsigned long c_addr)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
@@ -586,7 +529,7 @@ void s5p_mfc_set_enc_frame_buffer_v5(struct s5p_mfc_ctx *ctx,
 	mfc_write(dev, OFFSETB(c_addr), S5P_FIMV_ENC_SI_CH0_CUR_C_ADR);
 }
 
-void s5p_mfc_get_enc_frame_buffer_v5(struct s5p_mfc_ctx *ctx,
+static void s5p_mfc_get_enc_frame_buffer_v5(struct s5p_mfc_ctx *ctx,
 		unsigned long *y_addr, unsigned long *c_addr)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
@@ -598,7 +541,7 @@ void s5p_mfc_get_enc_frame_buffer_v5(struct s5p_mfc_ctx *ctx,
 }
 
 /* Set encoding ref & codec buffer */
-int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	size_t buf_addr1, buf_addr2;
@@ -607,10 +550,10 @@ int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
 	unsigned int guard_width, guard_height;
 	int i;
 
-	buf_addr1 = ctx->bank1_phys;
-	buf_size1 = ctx->bank1_size;
-	buf_addr2 = ctx->bank2_phys;
-	buf_size2 = ctx->bank2_size;
+	buf_addr1 = ctx->bank1.dma;
+	buf_size1 = ctx->bank1.size;
+	buf_addr2 = ctx->bank2.dma;
+	buf_size2 = ctx->bank2.size;
 	enc_ref_y_size = ALIGN(ctx->img_width, S5P_FIMV_NV12MT_HALIGN)
 		* ALIGN(ctx->img_height, S5P_FIMV_NV12MT_VALIGN);
 	enc_ref_y_size = ALIGN(enc_ref_y_size, S5P_FIMV_NV12MT_SALIGN);
@@ -626,7 +569,7 @@ int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
 		enc_ref_c_size = ALIGN(guard_width * guard_height,
 				       S5P_FIMV_NV12MT_SALIGN);
 	}
-	mfc_debug(2, "buf_size1: %d, buf_size2: %d\n", buf_size1, buf_size2);
+	mfc_debug(2, "buf_size1: %zu, buf_size2: %zu\n", buf_size1, buf_size2);
 	switch (ctx->codec_mode) {
 	case S5P_MFC_CODEC_H264_ENC:
 		for (i = 0; i < 2; i++) {
@@ -665,7 +608,7 @@ int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
 					S5P_FIMV_H264_NBOR_INFO_ADR);
 		buf_addr1 += S5P_FIMV_ENC_NBORINFO_SIZE;
 		buf_size1 -= S5P_FIMV_ENC_NBORINFO_SIZE;
-		mfc_debug(2, "buf_size1: %d, buf_size2: %d\n",
+		mfc_debug(2, "buf_size1: %zu, buf_size2: %zu\n",
 			buf_size1, buf_size2);
 		break;
 	case S5P_MFC_CODEC_MPEG4_ENC:
@@ -696,7 +639,7 @@ int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
 						S5P_FIMV_MPEG4_ACDC_COEF_ADR);
 		buf_addr1 += S5P_FIMV_ENC_ACDCCOEF_SIZE;
 		buf_size1 -= S5P_FIMV_ENC_ACDCCOEF_SIZE;
-		mfc_debug(2, "buf_size1: %d, buf_size2: %d\n",
+		mfc_debug(2, "buf_size1: %zu, buf_size2: %zu\n",
 			buf_size1, buf_size2);
 		break;
 	case S5P_MFC_CODEC_H263_ENC:
@@ -722,7 +665,7 @@ int s5p_mfc_set_enc_ref_buffer_v5(struct s5p_mfc_ctx *ctx)
 		mfc_write(dev, OFFSETA(buf_addr1), S5P_FIMV_H263_ACDC_COEF_ADR);
 		buf_addr1 += S5P_FIMV_ENC_ACDCCOEF_SIZE;
 		buf_size1 -= S5P_FIMV_ENC_ACDCCOEF_SIZE;
-		mfc_debug(2, "buf_size1: %d, buf_size2: %d\n",
+		mfc_debug(2, "buf_size1: %zu, buf_size2: %zu\n",
 			buf_size1, buf_size2);
 		break;
 	default:
@@ -1102,7 +1045,7 @@ static int s5p_mfc_set_enc_params_h263(struct s5p_mfc_ctx *ctx)
 }
 
 /* Initialize decoding */
-int s5p_mfc_init_decode_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_init_decode_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
@@ -1138,7 +1081,7 @@ static void s5p_mfc_set_flush(struct s5p_mfc_ctx *ctx, int flush)
 }
 
 /* Decode a single frame */
-int s5p_mfc_decode_one_frame_v5(struct s5p_mfc_ctx *ctx,
+static int s5p_mfc_decode_one_frame_v5(struct s5p_mfc_ctx *ctx,
 					enum s5p_mfc_decode_arg last_frame)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
@@ -1167,7 +1110,7 @@ int s5p_mfc_decode_one_frame_v5(struct s5p_mfc_ctx *ctx,
 	return 0;
 }
 
-int s5p_mfc_init_encode_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_init_encode_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
@@ -1189,7 +1132,7 @@ int s5p_mfc_init_encode_v5(struct s5p_mfc_ctx *ctx)
 }
 
 /* Encode a single frame */
-int s5p_mfc_encode_one_frame_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_encode_one_frame_v5(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	int cmd;
@@ -1210,34 +1153,12 @@ int s5p_mfc_encode_one_frame_v5(struct s5p_mfc_ctx *ctx)
 	return 0;
 }
 
-static int s5p_mfc_get_new_ctx(struct s5p_mfc_dev *dev)
-{
-	unsigned long flags;
-	int new_ctx;
-	int cnt;
-
-	spin_lock_irqsave(&dev->condlock, flags);
-	new_ctx = (dev->curr_ctx + 1) % MFC_NUM_CONTEXTS;
-	cnt = 0;
-	while (!test_bit(new_ctx, &dev->ctx_work_bits)) {
-		new_ctx = (new_ctx + 1) % MFC_NUM_CONTEXTS;
-		if (++cnt > MFC_NUM_CONTEXTS) {
-			/* No contexts to run */
-			spin_unlock_irqrestore(&dev->condlock, flags);
-			return -EAGAIN;
-		}
-	}
-	spin_unlock_irqrestore(&dev->condlock, flags);
-	return new_ctx;
-}
-
 static void s5p_mfc_run_res_change(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 
 	s5p_mfc_set_dec_stream_buffer_v5(ctx, 0, 0, 0);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_clean_ctx_int_flags(ctx);
 	s5p_mfc_decode_one_frame_v5(ctx, MFC_DEC_RES_CHANGE);
 }
 
@@ -1245,27 +1166,28 @@ static int s5p_mfc_run_dec_frame(struct s5p_mfc_ctx *ctx, int last_frame)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
 	struct s5p_mfc_buf *temp_vb;
-	unsigned long flags;
-	unsigned int index;
 
-	spin_lock_irqsave(&dev->irqlock, flags);
+	if (ctx->state == MFCINST_FINISHING) {
+		last_frame = MFC_DEC_LAST_FRAME;
+		s5p_mfc_set_dec_stream_buffer_v5(ctx, 0, 0, 0);
+		dev->curr_ctx = ctx->num;
+		s5p_mfc_decode_one_frame_v5(ctx, last_frame);
+		return 0;
+	}
+
 	/* Frames are being decoded */
 	if (list_empty(&ctx->src_queue)) {
 		mfc_debug(2, "No src buffers\n");
-		spin_unlock_irqrestore(&dev->irqlock, flags);
 		return -EAGAIN;
 	}
 	/* Get the next source buffer */
 	temp_vb = list_entry(ctx->src_queue.next, struct s5p_mfc_buf, list);
 	temp_vb->flags |= MFC_BUF_FLAG_USED;
 	s5p_mfc_set_dec_stream_buffer_v5(ctx,
-		vb2_dma_contig_plane_dma_addr(temp_vb->b, 0),
-		ctx->consumed_stream, temp_vb->b->v4l2_planes[0].bytesused);
-	spin_unlock_irqrestore(&dev->irqlock, flags);
-	index = temp_vb->b->v4l2_buf.index;
+		vb2_dma_contig_plane_dma_addr(&temp_vb->b->vb2_buf, 0),
+		ctx->consumed_stream, temp_vb->b->vb2_buf.planes[0].bytesused);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_clean_ctx_int_flags(ctx);
-	if (temp_vb->b->v4l2_planes[0].bytesused == 0) {
+	if (temp_vb->b->vb2_buf.planes[0].bytesused == 0) {
 		last_frame = MFC_DEC_LAST_FRAME;
 		mfc_debug(2, "Setting ctx->state to FINISHING\n");
 		ctx->state = MFCINST_FINISHING;
@@ -1277,21 +1199,17 @@ static int s5p_mfc_run_dec_frame(struct s5p_mfc_ctx *ctx, int last_frame)
 static int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
-	unsigned long flags;
 	struct s5p_mfc_buf *dst_mb;
 	struct s5p_mfc_buf *src_mb;
 	unsigned long src_y_addr, src_c_addr, dst_addr;
 	unsigned int dst_size;
 
-	spin_lock_irqsave(&dev->irqlock, flags);
 	if (list_empty(&ctx->src_queue) && ctx->state != MFCINST_FINISHING) {
 		mfc_debug(2, "no src buffers\n");
-		spin_unlock_irqrestore(&dev->irqlock, flags);
 		return -EAGAIN;
 	}
 	if (list_empty(&ctx->dst_queue)) {
 		mfc_debug(2, "no dst buffers\n");
-		spin_unlock_irqrestore(&dev->irqlock, flags);
 		return -EAGAIN;
 	}
 	if (list_empty(&ctx->src_queue)) {
@@ -1302,16 +1220,16 @@ static int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
 		src_mb = list_entry(ctx->src_queue.next, struct s5p_mfc_buf,
 									list);
 		src_mb->flags |= MFC_BUF_FLAG_USED;
-		if (src_mb->b->v4l2_planes[0].bytesused == 0) {
+		if (src_mb->b->vb2_buf.planes[0].bytesused == 0) {
 			/* send null frame */
 			s5p_mfc_set_enc_frame_buffer_v5(ctx, dev->bank2,
 								dev->bank2);
 			ctx->state = MFCINST_FINISHING;
 		} else {
-			src_y_addr = vb2_dma_contig_plane_dma_addr(src_mb->b,
-									0);
-			src_c_addr = vb2_dma_contig_plane_dma_addr(src_mb->b,
-									1);
+			src_y_addr = vb2_dma_contig_plane_dma_addr(
+					&src_mb->b->vb2_buf, 0);
+			src_c_addr = vb2_dma_contig_plane_dma_addr(
+					&src_mb->b->vb2_buf, 1);
 			s5p_mfc_set_enc_frame_buffer_v5(ctx, src_y_addr,
 								src_c_addr);
 			if (src_mb->flags & MFC_BUF_FLAG_EOS)
@@ -1320,14 +1238,12 @@ static int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
 	}
 	dst_mb = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf, list);
 	dst_mb->flags |= MFC_BUF_FLAG_USED;
-	dst_addr = vb2_dma_contig_plane_dma_addr(dst_mb->b, 0);
-	dst_size = vb2_plane_size(dst_mb->b, 0);
+	dst_addr = vb2_dma_contig_plane_dma_addr(&dst_mb->b->vb2_buf, 0);
+	dst_size = vb2_plane_size(&dst_mb->b->vb2_buf, 0);
 	s5p_mfc_set_enc_stream_buffer_v5(ctx, dst_addr, dst_size);
-	spin_unlock_irqrestore(&dev->irqlock, flags);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_clean_ctx_int_flags(ctx);
-	mfc_debug(2, "encoding buffer with index=%d state=%d",
-			src_mb ? src_mb->b->v4l2_buf.index : -1, ctx->state);
+	mfc_debug(2, "encoding buffer with index=%d state=%d\n",
+		  src_mb ? src_mb->b->vb2_buf.index : -1, ctx->state);
 	s5p_mfc_encode_one_frame_v5(ctx);
 	return 0;
 }
@@ -1335,48 +1251,40 @@ static int s5p_mfc_run_enc_frame(struct s5p_mfc_ctx *ctx)
 static void s5p_mfc_run_init_dec(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
-	unsigned long flags;
 	struct s5p_mfc_buf *temp_vb;
 
 	/* Initializing decoding - parsing header */
-	spin_lock_irqsave(&dev->irqlock, flags);
 	mfc_debug(2, "Preparing to init decoding\n");
 	temp_vb = list_entry(ctx->src_queue.next, struct s5p_mfc_buf, list);
 	s5p_mfc_set_dec_desc_buffer(ctx);
-	mfc_debug(2, "Header size: %d\n", temp_vb->b->v4l2_planes[0].bytesused);
+	mfc_debug(2, "Header size: %d\n",
+			temp_vb->b->vb2_buf.planes[0].bytesused);
 	s5p_mfc_set_dec_stream_buffer_v5(ctx,
-				vb2_dma_contig_plane_dma_addr(temp_vb->b, 0),
-				0, temp_vb->b->v4l2_planes[0].bytesused);
-	spin_unlock_irqrestore(&dev->irqlock, flags);
+			vb2_dma_contig_plane_dma_addr(&temp_vb->b->vb2_buf, 0),
+			0, temp_vb->b->vb2_buf.planes[0].bytesused);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_clean_ctx_int_flags(ctx);
 	s5p_mfc_init_decode_v5(ctx);
 }
 
 static void s5p_mfc_run_init_enc(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
-	unsigned long flags;
 	struct s5p_mfc_buf *dst_mb;
 	unsigned long dst_addr;
 	unsigned int dst_size;
 
 	s5p_mfc_set_enc_ref_buffer_v5(ctx);
-	spin_lock_irqsave(&dev->irqlock, flags);
 	dst_mb = list_entry(ctx->dst_queue.next, struct s5p_mfc_buf, list);
-	dst_addr = vb2_dma_contig_plane_dma_addr(dst_mb->b, 0);
-	dst_size = vb2_plane_size(dst_mb->b, 0);
+	dst_addr = vb2_dma_contig_plane_dma_addr(&dst_mb->b->vb2_buf, 0);
+	dst_size = vb2_plane_size(&dst_mb->b->vb2_buf, 0);
 	s5p_mfc_set_enc_stream_buffer_v5(ctx, dst_addr, dst_size);
-	spin_unlock_irqrestore(&dev->irqlock, flags);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_clean_ctx_int_flags(ctx);
 	s5p_mfc_init_encode_v5(ctx);
 }
 
 static int s5p_mfc_run_init_dec_buffers(struct s5p_mfc_ctx *ctx)
 {
 	struct s5p_mfc_dev *dev = ctx->dev;
-	unsigned long flags;
 	struct s5p_mfc_buf *temp_vb;
 	int ret;
 
@@ -1390,21 +1298,18 @@ static int s5p_mfc_run_init_dec_buffers(struct s5p_mfc_ctx *ctx)
 			"before starting processing\n");
 		return -EAGAIN;
 	}
-	spin_lock_irqsave(&dev->irqlock, flags);
 	if (list_empty(&ctx->src_queue)) {
 		mfc_err("Header has been deallocated in the middle of"
 			" initialization\n");
-		spin_unlock_irqrestore(&dev->irqlock, flags);
 		return -EIO;
 	}
 	temp_vb = list_entry(ctx->src_queue.next, struct s5p_mfc_buf, list);
-	mfc_debug(2, "Header size: %d\n", temp_vb->b->v4l2_planes[0].bytesused);
+	mfc_debug(2, "Header size: %d\n",
+			temp_vb->b->vb2_buf.planes[0].bytesused);
 	s5p_mfc_set_dec_stream_buffer_v5(ctx,
-				vb2_dma_contig_plane_dma_addr(temp_vb->b, 0),
-				0, temp_vb->b->v4l2_planes[0].bytesused);
-	spin_unlock_irqrestore(&dev->irqlock, flags);
+			vb2_dma_contig_plane_dma_addr(&temp_vb->b->vb2_buf, 0),
+			0, temp_vb->b->vb2_buf.planes[0].bytesused);
 	dev->curr_ctx = ctx->num;
-	s5p_mfc_clean_ctx_int_flags(ctx);
 	ret = s5p_mfc_set_dec_frame_buffer_v5(ctx);
 	if (ret) {
 		mfc_err("Failed to alloc frame mem\n");
@@ -1414,7 +1319,7 @@ static int s5p_mfc_run_init_dec_buffers(struct s5p_mfc_ctx *ctx)
 }
 
 /* Try running an operation on hardware */
-void s5p_mfc_try_run_v5(struct s5p_mfc_dev *dev)
+static void s5p_mfc_try_run_v5(struct s5p_mfc_dev *dev)
 {
 	struct s5p_mfc_ctx *ctx;
 	int new_ctx;
@@ -1448,6 +1353,8 @@ void s5p_mfc_try_run_v5(struct s5p_mfc_dev *dev)
 	 * Now obtaining frames from MFC buffer
 	 */
 	s5p_mfc_clock_on();
+	s5p_mfc_clean_ctx_int_flags(ctx);
+
 	if (ctx->type == MFCINST_DECODER) {
 		s5p_mfc_set_dec_desc_buffer(ctx);
 		switch (ctx->state) {
@@ -1458,12 +1365,10 @@ void s5p_mfc_try_run_v5(struct s5p_mfc_dev *dev)
 			ret = s5p_mfc_run_dec_frame(ctx, MFC_DEC_FRAME);
 			break;
 		case MFCINST_INIT:
-			s5p_mfc_clean_ctx_int_flags(ctx);
 			ret = s5p_mfc_hw_call(dev->mfc_cmds, open_inst_cmd,
 					ctx);
 			break;
 		case MFCINST_RETURN_INST:
-			s5p_mfc_clean_ctx_int_flags(ctx);
 			ret = s5p_mfc_hw_call(dev->mfc_cmds, close_inst_cmd,
 					ctx);
 			break;
@@ -1496,12 +1401,10 @@ void s5p_mfc_try_run_v5(struct s5p_mfc_dev *dev)
 			ret = s5p_mfc_run_enc_frame(ctx);
 			break;
 		case MFCINST_INIT:
-			s5p_mfc_clean_ctx_int_flags(ctx);
 			ret = s5p_mfc_hw_call(dev->mfc_cmds, open_inst_cmd,
 					ctx);
 			break;
 		case MFCINST_RETURN_INST:
-			s5p_mfc_clean_ctx_int_flags(ctx);
 			ret = s5p_mfc_hw_call(dev->mfc_cmds, close_inst_cmd,
 					ctx);
 			break;
@@ -1529,67 +1432,52 @@ void s5p_mfc_try_run_v5(struct s5p_mfc_dev *dev)
 	}
 }
 
-
-void s5p_mfc_cleanup_queue_v5(struct list_head *lh, struct vb2_queue *vq)
-{
-	struct s5p_mfc_buf *b;
-	int i;
-
-	while (!list_empty(lh)) {
-		b = list_entry(lh->next, struct s5p_mfc_buf, list);
-		for (i = 0; i < b->b->num_planes; i++)
-			vb2_set_plane_payload(b->b, i, 0);
-		vb2_buffer_done(b->b, VB2_BUF_STATE_ERROR);
-		list_del(&b->list);
-	}
-}
-
-void s5p_mfc_clear_int_flags_v5(struct s5p_mfc_dev *dev)
+static void s5p_mfc_clear_int_flags_v5(struct s5p_mfc_dev *dev)
 {
 	mfc_write(dev, 0, S5P_FIMV_RISC_HOST_INT);
 	mfc_write(dev, 0, S5P_FIMV_RISC2HOST_CMD);
 	mfc_write(dev, 0xffff, S5P_FIMV_SI_RTN_CHID);
 }
 
-int s5p_mfc_get_dspl_y_adr_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_dspl_y_adr_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_DISPLAY_Y_ADR) << MFC_OFFSET_SHIFT;
 }
 
-int s5p_mfc_get_dec_y_adr_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_dec_y_adr_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_DECODE_Y_ADR) << MFC_OFFSET_SHIFT;
 }
 
-int s5p_mfc_get_dspl_status_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_dspl_status_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_DISPLAY_STATUS);
 }
 
-int s5p_mfc_get_dec_status_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_dec_status_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_DECODE_STATUS);
 }
 
-int s5p_mfc_get_dec_frame_type_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_dec_frame_type_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_DECODE_FRAME_TYPE) &
 		S5P_FIMV_DECODE_FRAME_MASK;
 }
 
-int s5p_mfc_get_disp_frame_type_v5(struct s5p_mfc_ctx *ctx)
+static int s5p_mfc_get_disp_frame_type_v5(struct s5p_mfc_ctx *ctx)
 {
 	return (s5p_mfc_read_info_v5(ctx, DISP_PIC_FRAME_TYPE) >>
 			S5P_FIMV_SHARED_DISP_FRAME_TYPE_SHIFT) &
 			S5P_FIMV_DECODE_FRAME_MASK;
 }
 
-int s5p_mfc_get_consumed_stream_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_consumed_stream_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_CONSUMED_BYTES);
 }
 
-int s5p_mfc_get_int_reason_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_int_reason_v5(struct s5p_mfc_dev *dev)
 {
 	int reason;
 	reason = mfc_read(dev, S5P_FIMV_RISC2HOST_CMD) &
@@ -1633,102 +1521,77 @@ int s5p_mfc_get_int_reason_v5(struct s5p_mfc_dev *dev)
 		break;
 	default:
 		reason = S5P_MFC_R2H_CMD_EMPTY;
-	};
+	}
 	return reason;
 }
 
-int s5p_mfc_get_int_err_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_int_err_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_RISC2HOST_ARG2);
 }
 
-int s5p_mfc_err_dec_v5(unsigned int err)
+static int s5p_mfc_err_dec_v5(unsigned int err)
 {
 	return (err & S5P_FIMV_ERR_DEC_MASK) >> S5P_FIMV_ERR_DEC_SHIFT;
 }
 
-int s5p_mfc_err_dspl_v5(unsigned int err)
-{
-	return (err & S5P_FIMV_ERR_DSPL_MASK) >> S5P_FIMV_ERR_DSPL_SHIFT;
-}
-
-int s5p_mfc_get_img_width_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_img_width_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_HRESOL);
 }
 
-int s5p_mfc_get_img_height_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_img_height_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_VRESOL);
 }
 
-int s5p_mfc_get_dpb_count_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_dpb_count_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_SI_BUF_NUMBER);
 }
 
-int s5p_mfc_get_mv_count_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_mv_count_v5(struct s5p_mfc_dev *dev)
 {
 	/* NOP */
 	return -1;
 }
 
-int s5p_mfc_get_inst_no_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_inst_no_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_RISC2HOST_ARG1);
 }
 
-int s5p_mfc_get_enc_strm_size_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_enc_strm_size_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_ENC_SI_STRM_SIZE);
 }
 
-int s5p_mfc_get_enc_slice_type_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_enc_slice_type_v5(struct s5p_mfc_dev *dev)
 {
 	return mfc_read(dev, S5P_FIMV_ENC_SI_SLICE_TYPE);
 }
 
-int s5p_mfc_get_enc_dpb_count_v5(struct s5p_mfc_dev *dev)
+static int s5p_mfc_get_enc_dpb_count_v5(struct s5p_mfc_dev *dev)
 {
 	return -1;
 }
 
-int s5p_mfc_get_enc_pic_count_v5(struct s5p_mfc_dev *dev)
-{
-	return mfc_read(dev, S5P_FIMV_ENC_SI_PIC_CNT);
-}
-
-int s5p_mfc_get_sei_avail_status_v5(struct s5p_mfc_ctx *ctx)
-{
-	return s5p_mfc_read_info_v5(ctx, FRAME_PACK_SEI_AVAIL);
-}
-
-int s5p_mfc_get_mvc_num_views_v5(struct s5p_mfc_dev *dev)
-{
-	return -1;
-}
-
-int s5p_mfc_get_mvc_view_id_v5(struct s5p_mfc_dev *dev)
-{
-	return -1;
-}
-
-unsigned int s5p_mfc_get_pic_type_top_v5(struct s5p_mfc_ctx *ctx)
+static unsigned int s5p_mfc_get_pic_type_top_v5(struct s5p_mfc_ctx *ctx)
 {
 	return s5p_mfc_read_info_v5(ctx, PIC_TIME_TOP);
 }
 
-unsigned int s5p_mfc_get_pic_type_bot_v5(struct s5p_mfc_ctx *ctx)
+static unsigned int s5p_mfc_get_pic_type_bot_v5(struct s5p_mfc_ctx *ctx)
 {
 	return s5p_mfc_read_info_v5(ctx, PIC_TIME_BOT);
 }
 
-unsigned int s5p_mfc_get_crop_info_h_v5(struct s5p_mfc_ctx *ctx)
+static unsigned int s5p_mfc_get_crop_info_h_v5(struct s5p_mfc_ctx *ctx)
 {
 	return s5p_mfc_read_info_v5(ctx, CROP_INFO_H);
 }
 
-unsigned int s5p_mfc_get_crop_info_v_v5(struct s5p_mfc_ctx *ctx)
+static unsigned int s5p_mfc_get_crop_info_v_v5(struct s5p_mfc_ctx *ctx)
 {
 	return s5p_mfc_read_info_v5(ctx, CROP_INFO_V);
 }
@@ -1745,20 +1608,11 @@ static struct s5p_mfc_hw_ops s5p_mfc_ops_v5 = {
 	.release_dev_context_buffer = s5p_mfc_release_dev_context_buffer_v5,
 	.dec_calc_dpb_size = s5p_mfc_dec_calc_dpb_size_v5,
 	.enc_calc_src_size = s5p_mfc_enc_calc_src_size_v5,
-	.set_dec_stream_buffer = s5p_mfc_set_dec_stream_buffer_v5,
-	.set_dec_frame_buffer = s5p_mfc_set_dec_frame_buffer_v5,
 	.set_enc_stream_buffer = s5p_mfc_set_enc_stream_buffer_v5,
 	.set_enc_frame_buffer = s5p_mfc_set_enc_frame_buffer_v5,
 	.get_enc_frame_buffer = s5p_mfc_get_enc_frame_buffer_v5,
-	.set_enc_ref_buffer = s5p_mfc_set_enc_ref_buffer_v5,
-	.init_decode = s5p_mfc_init_decode_v5,
-	.init_encode = s5p_mfc_init_encode_v5,
-	.encode_one_frame = s5p_mfc_encode_one_frame_v5,
 	.try_run = s5p_mfc_try_run_v5,
-	.cleanup_queue = s5p_mfc_cleanup_queue_v5,
 	.clear_int_flags = s5p_mfc_clear_int_flags_v5,
-	.write_info = s5p_mfc_write_info_v5,
-	.read_info = s5p_mfc_read_info_v5,
 	.get_dspl_y_adr = s5p_mfc_get_dspl_y_adr_v5,
 	.get_dec_y_adr = s5p_mfc_get_dec_y_adr_v5,
 	.get_dspl_status = s5p_mfc_get_dspl_status_v5,
@@ -1769,7 +1623,6 @@ static struct s5p_mfc_hw_ops s5p_mfc_ops_v5 = {
 	.get_int_reason = s5p_mfc_get_int_reason_v5,
 	.get_int_err = s5p_mfc_get_int_err_v5,
 	.err_dec = s5p_mfc_err_dec_v5,
-	.err_dspl = s5p_mfc_err_dspl_v5,
 	.get_img_width = s5p_mfc_get_img_width_v5,
 	.get_img_height = s5p_mfc_get_img_height_v5,
 	.get_dpb_count = s5p_mfc_get_dpb_count_v5,
@@ -1778,10 +1631,6 @@ static struct s5p_mfc_hw_ops s5p_mfc_ops_v5 = {
 	.get_enc_strm_size = s5p_mfc_get_enc_strm_size_v5,
 	.get_enc_slice_type = s5p_mfc_get_enc_slice_type_v5,
 	.get_enc_dpb_count = s5p_mfc_get_enc_dpb_count_v5,
-	.get_enc_pic_count = s5p_mfc_get_enc_pic_count_v5,
-	.get_sei_avail_status = s5p_mfc_get_sei_avail_status_v5,
-	.get_mvc_num_views = s5p_mfc_get_mvc_num_views_v5,
-	.get_mvc_view_id = s5p_mfc_get_mvc_view_id_v5,
 	.get_pic_type_top = s5p_mfc_get_pic_type_top_v5,
 	.get_pic_type_bot = s5p_mfc_get_pic_type_bot_v5,
 	.get_crop_info_h = s5p_mfc_get_crop_info_h_v5,

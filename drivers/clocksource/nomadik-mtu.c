@@ -13,12 +13,15 @@
 #include <linux/io.h>
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
+#include <linux/of_platform.h>
 #include <linux/clk.h>
 #include <linux/jiffies.h>
+#include <linux/delay.h>
 #include <linux/err.h>
-#include <linux/platform_data/clocksource-nomadik-mtu.h>
+#include <linux/sched_clock.h>
 #include <asm/mach/time.h>
-#include <asm/sched_clock.h>
 
 /*
  * The MTU device hosts four different counters, with 4 set of
@@ -64,14 +67,15 @@ static void __iomem *mtu_base;
 static bool clkevt_periodic;
 static u32 clk_prescale;
 static u32 nmdk_cycle;		/* write-once */
+static struct delay_timer mtu_delay_timer;
 
-#ifdef CONFIG_NOMADIK_MTU_SCHED_CLOCK
+#ifdef CONFIG_CLKSRC_NOMADIK_MTU_SCHED_CLOCK
 /*
  * Override the global weak sched_clock symbol with this
  * local implementation which uses the clocksource to get some
  * better resolution when scheduling the kernel.
  */
-static u32 notrace nomadik_read_sched_clock(void)
+static u64 notrace nomadik_read_sched_clock(void)
 {
 	if (unlikely(!mtu_base))
 		return 0;
@@ -79,6 +83,11 @@ static u32 notrace nomadik_read_sched_clock(void)
 	return -readl(mtu_base + MTU_VAL(0));
 }
 #endif
+
+static unsigned long nmdk_timer_read_current_timer(void)
+{
+	return ~readl_relaxed(mtu_base + MTU_VAL(0));
+}
 
 /* Clockevent device: use one-shot mode */
 static int nmdk_clkevt_next(unsigned long evt, struct clock_event_device *ev)
@@ -93,7 +102,7 @@ static int nmdk_clkevt_next(unsigned long evt, struct clock_event_device *ev)
 	return 0;
 }
 
-void nmdk_clkevt_reset(void)
+static void nmdk_clkevt_reset(void)
 {
 	if (clkevt_periodic) {
 		/* Timer: configure load and background-load, and fire it up */
@@ -110,36 +119,59 @@ void nmdk_clkevt_reset(void)
 	}
 }
 
-static void nmdk_clkevt_mode(enum clock_event_mode mode,
-			     struct clock_event_device *dev)
+static int nmdk_clkevt_shutdown(struct clock_event_device *evt)
 {
-	switch (mode) {
-	case CLOCK_EVT_MODE_PERIODIC:
-		clkevt_periodic = true;
-		nmdk_clkevt_reset();
-		break;
-	case CLOCK_EVT_MODE_ONESHOT:
-		clkevt_periodic = false;
-		break;
-	case CLOCK_EVT_MODE_SHUTDOWN:
-	case CLOCK_EVT_MODE_UNUSED:
-		writel(0, mtu_base + MTU_IMSC);
-		/* disable timer */
-		writel(0, mtu_base + MTU_CR(1));
-		/* load some high default value */
-		writel(0xffffffff, mtu_base + MTU_LR(1));
-		break;
-	case CLOCK_EVT_MODE_RESUME:
-		break;
-	}
+	writel(0, mtu_base + MTU_IMSC);
+	/* disable timer */
+	writel(0, mtu_base + MTU_CR(1));
+	/* load some high default value */
+	writel(0xffffffff, mtu_base + MTU_LR(1));
+	return 0;
+}
+
+static int nmdk_clkevt_set_oneshot(struct clock_event_device *evt)
+{
+	clkevt_periodic = false;
+	return 0;
+}
+
+static int nmdk_clkevt_set_periodic(struct clock_event_device *evt)
+{
+	clkevt_periodic = true;
+	nmdk_clkevt_reset();
+	return 0;
+}
+
+static void nmdk_clksrc_reset(void)
+{
+	/* Disable */
+	writel(0, mtu_base + MTU_CR(0));
+
+	/* ClockSource: configure load and background-load, and fire it up */
+	writel(nmdk_cycle, mtu_base + MTU_LR(0));
+	writel(nmdk_cycle, mtu_base + MTU_BGLR(0));
+
+	writel(clk_prescale | MTU_CRn_32BITS | MTU_CRn_ENA,
+	       mtu_base + MTU_CR(0));
+}
+
+static void nmdk_clkevt_resume(struct clock_event_device *cedev)
+{
+	nmdk_clkevt_reset();
+	nmdk_clksrc_reset();
 }
 
 static struct clock_event_device nmdk_clkevt = {
-	.name		= "mtu_1",
-	.features	= CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_PERIODIC,
-	.rating		= 200,
-	.set_mode	= nmdk_clkevt_mode,
-	.set_next_event	= nmdk_clkevt_next,
+	.name			= "mtu_1",
+	.features		= CLOCK_EVT_FEAT_ONESHOT |
+				  CLOCK_EVT_FEAT_PERIODIC |
+				  CLOCK_EVT_FEAT_DYNIRQ,
+	.rating			= 200,
+	.set_state_shutdown	= nmdk_clkevt_shutdown,
+	.set_state_periodic	= nmdk_clkevt_set_periodic,
+	.set_state_oneshot	= nmdk_clkevt_set_oneshot,
+	.set_next_event		= nmdk_clkevt_next,
+	.resume			= nmdk_clkevt_resume,
 };
 
 /*
@@ -156,40 +188,21 @@ static irqreturn_t nmdk_timer_interrupt(int irq, void *dev_id)
 
 static struct irqaction nmdk_timer_irq = {
 	.name		= "Nomadik Timer Tick",
-	.flags		= IRQF_DISABLED | IRQF_TIMER,
+	.flags		= IRQF_TIMER,
 	.handler	= nmdk_timer_interrupt,
 	.dev_id		= &nmdk_clkevt,
 };
 
-void nmdk_clksrc_reset(void)
-{
-	/* Disable */
-	writel(0, mtu_base + MTU_CR(0));
-
-	/* ClockSource: configure load and background-load, and fire it up */
-	writel(nmdk_cycle, mtu_base + MTU_LR(0));
-	writel(nmdk_cycle, mtu_base + MTU_BGLR(0));
-
-	writel(clk_prescale | MTU_CRn_32BITS | MTU_CRn_ENA,
-	       mtu_base + MTU_CR(0));
-}
-
-void __init nmdk_timer_init(void __iomem *base, int irq)
+static int __init nmdk_timer_init(void __iomem *base, int irq,
+				   struct clk *pclk, struct clk *clk)
 {
 	unsigned long rate;
-	struct clk *clk0, *pclk0;
+	int ret;
 
 	mtu_base = base;
 
-	pclk0 = clk_get_sys("mtu0", "apb_pclk");
-	BUG_ON(IS_ERR(pclk0));
-	BUG_ON(clk_prepare(pclk0) < 0);
-	BUG_ON(clk_enable(pclk0) < 0);
-
-	clk0 = clk_get_sys("mtu0", NULL);
-	BUG_ON(IS_ERR(clk0));
-	BUG_ON(clk_prepare(clk0) < 0);
-	BUG_ON(clk_enable(clk0) < 0);
+	BUG_ON(clk_prepare_enable(pclk));
+	BUG_ON(clk_prepare_enable(clk));
 
 	/*
 	 * Tick rate is 2.4MHz for Nomadik and 2.4Mhz, 100MHz or 133 MHz
@@ -199,7 +212,7 @@ void __init nmdk_timer_init(void __iomem *base, int irq)
 	 * to wake-up at a max 127s a head in time. Dividing a 2.4 MHz timer
 	 * with 16 gives too low timer resolution.
 	 */
-	rate = clk_get_rate(clk0);
+	rate = clk_get_rate(clk);
 	if (rate > 32000000) {
 		rate /= 16;
 		clk_prescale = MTU_CRn_PRESCALE_16;
@@ -214,17 +227,62 @@ void __init nmdk_timer_init(void __iomem *base, int irq)
 	/* Timer 0 is the free running clocksource */
 	nmdk_clksrc_reset();
 
-	if (clocksource_mmio_init(mtu_base + MTU_VAL(0), "mtu_0",
-			rate, 200, 32, clocksource_mmio_readl_down))
-		pr_err("timer: failed to initialize clock source %s\n",
-		       "mtu_0");
+	ret = clocksource_mmio_init(mtu_base + MTU_VAL(0), "mtu_0",
+				    rate, 200, 32, clocksource_mmio_readl_down);
+	if (ret) {
+		pr_err("timer: failed to initialize clock source %s\n", "mtu_0");
+		return ret;
+	}
 
-#ifdef CONFIG_NOMADIK_MTU_SCHED_CLOCK
-	setup_sched_clock(nomadik_read_sched_clock, 32, rate);
+#ifdef CONFIG_CLKSRC_NOMADIK_MTU_SCHED_CLOCK
+	sched_clock_register(nomadik_read_sched_clock, 32, rate);
 #endif
 
 	/* Timer 1 is used for events, register irq and clockevents */
 	setup_irq(irq, &nmdk_timer_irq);
 	nmdk_clkevt.cpumask = cpumask_of(0);
+	nmdk_clkevt.irq = irq;
 	clockevents_config_and_register(&nmdk_clkevt, rate, 2, 0xffffffffU);
+
+	mtu_delay_timer.read_current_timer = &nmdk_timer_read_current_timer;
+	mtu_delay_timer.freq = rate;
+	register_current_timer_delay(&mtu_delay_timer);
+
+	return 0;
 }
+
+static int __init nmdk_timer_of_init(struct device_node *node)
+{
+	struct clk *pclk;
+	struct clk *clk;
+	void __iomem *base;
+	int irq;
+
+	base = of_iomap(node, 0);
+	if (!base) {
+		pr_err("Can't remap registers");
+		return -ENXIO;
+	}
+
+	pclk = of_clk_get_by_name(node, "apb_pclk");
+	if (IS_ERR(pclk)) {
+		pr_err("could not get apb_pclk");
+		return PTR_ERR(pclk);
+	}
+
+	clk = of_clk_get_by_name(node, "timclk");
+	if (IS_ERR(clk)) {
+		pr_err("could not get timclk");
+		return PTR_ERR(clk);
+	}
+
+	irq = irq_of_parse_and_map(node, 0);
+	if (irq <= 0) {
+		pr_err("Can't parse IRQ");
+		return -EINVAL;
+	}
+
+	return nmdk_timer_init(base, irq, pclk, clk);
+}
+CLOCKSOURCE_OF_DECLARE(nomadik_mtu, "st,nomadik-mtu",
+		       nmdk_timer_of_init);

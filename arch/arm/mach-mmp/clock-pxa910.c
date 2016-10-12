@@ -4,8 +4,9 @@
 #include <linux/list.h>
 #include <linux/io.h>
 #include <linux/clk.h>
+#include <linux/clk/mmp.h>
 
-#include <mach/addr-map.h>
+#include "addr-map.h"
 
 #include "common.h"
 #include "clock.h"
@@ -56,12 +57,13 @@ static struct clk_lookup pxa910_clkregs[] = {
 	INIT_CLKREG(&clk_pwm3, "pxa910-pwm.2", NULL),
 	INIT_CLKREG(&clk_pwm4, "pxa910-pwm.3", NULL),
 	INIT_CLKREG(&clk_nand, "pxa3xx-nand", NULL),
-	INIT_CLKREG(&clk_gpio, "pxa-gpio", NULL),
+	INIT_CLKREG(&clk_gpio, "mmp-gpio", NULL),
 	INIT_CLKREG(&clk_u2o, NULL, "U2OCLK"),
 	INIT_CLKREG(&clk_rtc, "sa1100-rtc", NULL),
 };
 
-void __init pxa910_clk_init(void)
+void __init pxa910_clk_init(phys_addr_t mpmu_phys, phys_addr_t apmu_phys,
+			    phys_addr_t apbc_phys, phys_addr_t apbcp_phys)
 {
 	clkdev_add_table(ARRAY_AND_SIZE(pxa910_clkregs));
 }

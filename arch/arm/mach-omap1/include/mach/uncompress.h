@@ -45,7 +45,7 @@ static void set_omap_uart_info(unsigned char port)
 	*uart_info = port;
 }
 
-static void putc(int c)
+static inline void putc(int c)
 {
 	if (!uart_base)
 		return;
@@ -115,8 +115,3 @@ static inline void arch_decomp_setup(void)
 		DEBUG_LL_OMAP1(3, sx1);
 	} while (0);
 }
-
-/*
- * nothing to do
- */
-#define arch_decomp_wdog()

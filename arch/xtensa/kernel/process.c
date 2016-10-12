@@ -24,6 +24,7 @@
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
 #include <linux/elf.h>
+#include <linux/hw_breakpoint.h>
 #include <linux/init.h>
 #include <linux/prctl.h>
 #include <linux/init_task.h>
@@ -43,6 +44,7 @@
 #include <linux/atomic.h>
 #include <asm/asm-offsets.h>
 #include <asm/regs.h>
+#include <asm/hw_breakpoint.h>
 
 extern void ret_from_fork(void);
 extern void ret_from_kernel_thread(void);
@@ -105,28 +107,18 @@ void coprocessor_flush_all(struct thread_info *ti)
 /*
  * Powermanagement idle function, if any is provided by the platform.
  */
-
-void cpu_idle(void)
+void arch_cpu_idle(void)
 {
-	local_irq_enable();
-
-	/* endless idle loop with no priority at all */
-	while (1) {
-		rcu_idle_enter();
-		while (!need_resched())
-			platform_idle();
-		rcu_idle_exit();
-		schedule_preempt_disabled();
-	}
+	platform_idle();
 }
 
 /*
  * This is called when the thread calls exit().
  */
-void exit_thread(void)
+void exit_thread(struct task_struct *tsk)
 {
 #if XTENSA_HAVE_COPROCESSORS
-	coprocessor_release_all(current_thread_info());
+	coprocessor_release_all(task_thread_info(tsk));
 #endif
 }
 
@@ -141,6 +133,7 @@ void flush_thread(void)
 	coprocessor_flush_all(ti);
 	coprocessor_release_all(ti);
 #endif
+	flush_ptrace_hw_breakpoint(current);
 }
 
 /*
@@ -259,9 +252,10 @@ int copy_thread(unsigned long clone_flags, unsigned long usp_thread_fn,
 			memcpy(&childregs->areg[XCHAL_NUM_AREGS - len/4],
 			       &regs->areg[XCHAL_NUM_AREGS - len/4], len);
 		}
-// FIXME: we need to set THREADPTR in thread_info...
+
+		/* The thread pointer is passed in the '4th argument' (= a5) */
 		if (clone_flags & CLONE_SETTLS)
-			childregs->areg[2] = childregs->areg[6];
+			childregs->threadptr = childregs->areg[5];
 	} else {
 		p->thread.ra = MAKE_RA_FOR_CALL(
 				(unsigned long)ret_from_kernel_thread, 1);
@@ -281,6 +275,8 @@ int copy_thread(unsigned long clone_flags, unsigned long usp_thread_fn,
 	ti = task_thread_info(p);
 	ti->cpenable = 0;
 #endif
+
+	clear_ptrace_hw_breakpoint(p);
 
 	return 0;
 }

@@ -55,12 +55,6 @@ config MACH_OMAP_H3
 	  TI OMAP 1710 H3 board support. Say Y here if you have such
 	  a board.
 
-config MACH_OMAP_HTCWIZARD
-	bool "HTC Wizard"
-	depends on ARCH_OMAP850
-	help
-	  HTC Wizard smartphone support (AKA QTEK 9100, ...)
-
 config MACH_HERALD
 	bool "HTC Herald"
 	depends on ARCH_OMAP850
@@ -95,13 +89,6 @@ config MACH_OMAP_FSAMPLE
     	help
 	  Support for TI OMAP 850 F-Sample board. Say Y here if you have such
 	  a board.
-
-config MACH_VOICEBLUE
-	bool "Voiceblue"
-	depends on ARCH_OMAP1 && ARCH_OMAP15XX
-	help
-	  Support for Voiceblue GSM/VoIP gateway. Say Y here if you have
-	  such a board.
 
 config MACH_OMAP_PALMTE
 	bool "Palm Tungsten E"

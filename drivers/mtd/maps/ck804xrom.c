@@ -112,8 +112,8 @@ static void ck804xrom_cleanup(struct ck804xrom_window *window)
 }
 
 
-static int ck804xrom_init_one(struct pci_dev *pdev,
-			      const struct pci_device_id *ent)
+static int __init ck804xrom_init_one(struct pci_dev *pdev,
+				     const struct pci_device_id *ent)
 {
 	static char *rom_probe_types[] = { "cfi_probe", "jedec_probe", NULL };
 	u8 byte;
@@ -308,8 +308,7 @@ static int ck804xrom_init_one(struct pci_dev *pdev,
 
  out:
 	/* Free any left over map structures */
-	if (map)
-		kfree(map);
+	kfree(map);
 
 	/* See if I have any map structures */
 	if (list_empty(&window->maps)) {

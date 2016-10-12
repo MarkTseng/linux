@@ -31,7 +31,7 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
 
-#include <mach/pxa930.h>
+#include "pxa930.h"
 #include <linux/platform_data/video-pxafb.h>
 
 #include "devices.h"
@@ -601,7 +601,7 @@ MACHINE_START(SAAR, "PXA930 Handheld Platform (aka SAAR)")
 	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq       = pxa3xx_init_irq,
 	.handle_irq       = pxa3xx_handle_irq,
-	.timer          = &pxa_timer,
+	.init_time	= pxa_timer_init,
 	.init_machine   = saar_init,
 	.restart	= pxa_restart,
 MACHINE_END

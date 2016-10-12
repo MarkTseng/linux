@@ -1,8 +1,10 @@
 #ifndef ISCSI_PARAMETERS_H
 #define ISCSI_PARAMETERS_H
 
+#include <scsi/iscsi_proto.h>
+
 struct iscsi_extra_response {
-	char key[64];
+	char key[KEY_MAXLEN];
 	char value[32];
 	struct list_head er_list;
 } ____cacheline_aligned;
@@ -27,7 +29,7 @@ extern void iscsi_dump_conn_ops(struct iscsi_conn_ops *);
 extern void iscsi_dump_sess_ops(struct iscsi_sess_ops *);
 extern void iscsi_print_params(struct iscsi_param_list *);
 extern int iscsi_create_default_params(struct iscsi_param_list **);
-extern int iscsi_set_keys_to_negotiate(int, struct iscsi_param_list *);
+extern int iscsi_set_keys_to_negotiate(struct iscsi_param_list *, bool);
 extern int iscsi_set_keys_irrelevant_for_discovery(struct iscsi_param_list *);
 extern int iscsi_copy_param_list(struct iscsi_param_list **,
 			struct iscsi_param_list *, int);
@@ -89,6 +91,13 @@ extern void iscsi_set_session_parameters(struct iscsi_sess_ops *,
 #define X_EXTENSIONKEY_CISCO_OLD	"X-com.cisco.iscsi.draft"
 
 /*
+ * Parameter names of iSCSI Extentions for RDMA (iSER).  See RFC-5046
+ */
+#define RDMAEXTENSIONS			"RDMAExtensions"
+#define INITIATORRECVDATASEGMENTLENGTH	"InitiatorRecvDataSegmentLength"
+#define TARGETRECVDATASEGMENTLENGTH	"TargetRecvDataSegmentLength"
+
+/*
  * For AuthMethod.
  */
 #define KRB5				"KRB5"
@@ -129,8 +138,15 @@ extern void iscsi_set_session_parameters(struct iscsi_sess_ops *,
 #define INITIAL_SESSIONTYPE			NORMAL
 #define INITIAL_IFMARKER			NO
 #define INITIAL_OFMARKER			NO
-#define INITIAL_IFMARKINT			"2048~65535"
-#define INITIAL_OFMARKINT			"2048~65535"
+#define INITIAL_IFMARKINT			REJECT
+#define INITIAL_OFMARKINT			REJECT
+
+/*
+ * Initial values for iSER parameters following RFC-5046 Section 6
+ */
+#define INITIAL_RDMAEXTENSIONS			NO
+#define INITIAL_INITIATORRECVDATASEGMENTLENGTH	"262144"
+#define INITIAL_TARGETRECVDATASEGMENTLENGTH	"8192"
 
 /*
  * For [Header,Data]Digests.
@@ -223,10 +239,9 @@ extern void iscsi_set_session_parameters(struct iscsi_sess_ops *,
 #define TYPERANGE_AUTH			0x0200
 #define TYPERANGE_DIGEST		0x0400
 #define TYPERANGE_ISCSINAME		0x0800
-#define TYPERANGE_MARKINT		0x1000
-#define TYPERANGE_SESSIONTYPE		0x2000
-#define TYPERANGE_TARGETADDRESS		0x4000
-#define TYPERANGE_UTF8			0x8000
+#define TYPERANGE_SESSIONTYPE		0x1000
+#define TYPERANGE_TARGETADDRESS		0x2000
+#define TYPERANGE_UTF8			0x4000
 
 #define IS_TYPERANGE_0_TO_2(p)		((p)->type_range & TYPERANGE_0_TO_2)
 #define IS_TYPERANGE_0_TO_3600(p)	((p)->type_range & TYPERANGE_0_TO_3600)

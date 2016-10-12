@@ -10,35 +10,9 @@
  * published by the Free Software Foundation.
  *
  */
-#define IMX6Q_UART1_BASE_ADDR	0x02020000
-#define IMX6Q_UART2_BASE_ADDR	0x021e8000
-#define IMX6Q_UART3_BASE_ADDR	0x021ec000
-#define IMX6Q_UART4_BASE_ADDR	0x021f0000
-#define IMX6Q_UART5_BASE_ADDR	0x021f4000
 
-/*
- * IMX6Q_UART_BASE_ADDR is put in the middle to force the expansion
- * of IMX6Q_UART##n##_BASE_ADDR.
- */
-#define IMX6Q_UART_BASE_ADDR(n)	IMX6Q_UART##n##_BASE_ADDR
-#define IMX6Q_UART_BASE(n)	IMX6Q_UART_BASE_ADDR(n)
-#define IMX6Q_DEBUG_UART_BASE	IMX6Q_UART_BASE(CONFIG_DEBUG_IMX6Q_UART_PORT)
-
-#ifdef CONFIG_DEBUG_IMX1_UART
-#define UART_PADDR	0x00206000
-#elif defined (CONFIG_DEBUG_IMX25_UART)
-#define UART_PADDR	0x43f90000
-#elif defined (CONFIG_DEBUG_IMX21_IMX27_UART)
-#define UART_PADDR	0x1000a000
-#elif defined (CONFIG_DEBUG_IMX31_IMX35_UART)
-#define UART_PADDR	0x43f90000
-#elif defined (CONFIG_DEBUG_IMX51_UART)
-#define UART_PADDR	0x73fbc000
-#elif defined (CONFIG_DEBUG_IMX50_IMX53_UART)
-#define UART_PADDR	0x53fbc000
-#elif defined (CONFIG_DEBUG_IMX6Q_UART)
-#define UART_PADDR	IMX6Q_DEBUG_UART_BASE
-#endif
+#include <asm/assembler.h>
+#include "imx-uart.h"
 
 /*
  * FIXME: This is a copy of IMX_IO_P2V in hardware.h, and needs to
@@ -61,6 +35,7 @@
 		.endm
 
 		.macro	senduart,rd,rx
+		ARM_BE8(rev \rd, \rd)
 		str	\rd, [\rx, #0x40]	@ TXDATA
 		.endm
 
@@ -69,6 +44,7 @@
 
 		.macro	busyuart,rd,rx
 1002:		ldr	\rd, [\rx, #0x98]	@ SR2
+		ARM_BE8(rev \rd, \rd)
 		tst	\rd, #1 << 3		@ TXDC
 		beq	1002b			@ wait until transmit done
 		.endm

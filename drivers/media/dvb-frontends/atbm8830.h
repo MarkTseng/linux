@@ -60,8 +60,7 @@ struct atbm8830_config {
 	u8 agc_hold_loop;
 };
 
-#if defined(CONFIG_DVB_ATBM8830) || \
-	(defined(CONFIG_DVB_ATBM8830_MODULE) && defined(MODULE))
+#if IS_REACHABLE(CONFIG_DVB_ATBM8830)
 extern struct dvb_frontend *atbm8830_attach(const struct atbm8830_config *config,
 		struct i2c_adapter *i2c);
 #else

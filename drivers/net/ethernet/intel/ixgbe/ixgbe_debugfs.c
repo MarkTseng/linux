@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   Intel 10 Gigabit PCI Express Linux driver
-  Copyright(c) 1999 - 2012 Intel Corporation.
+  Copyright(c) 1999 - 2013 Intel Corporation.
 
   This program is free software; you can redistribute it and/or modify it
   under the terms and conditions of the GNU General Public License,
@@ -20,13 +20,11 @@
   the file called "COPYING".
 
   Contact Information:
+  Linux NICS <linux.nics@intel.com>
   e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
 *******************************************************************************/
-
-#ifdef CONFIG_DEBUG_FS
-
 #include <linux/debugfs.h>
 #include <linux/module.h>
 
@@ -255,8 +253,7 @@ void ixgbe_dbg_adapter_init(struct ixgbe_adapter *adapter)
  **/
 void ixgbe_dbg_adapter_exit(struct ixgbe_adapter *adapter)
 {
-	if (adapter->ixgbe_dbg_adapter)
-		debugfs_remove_recursive(adapter->ixgbe_dbg_adapter);
+	debugfs_remove_recursive(adapter->ixgbe_dbg_adapter);
 	adapter->ixgbe_dbg_adapter = NULL;
 }
 
@@ -277,5 +274,3 @@ void ixgbe_dbg_exit(void)
 {
 	debugfs_remove_recursive(ixgbe_dbg_root);
 }
-
-#endif /* CONFIG_DEBUG_FS */

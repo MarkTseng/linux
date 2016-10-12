@@ -34,8 +34,7 @@
  * @param i2c i2c adapter to use.
  * @return FE pointer on success, NULL on failure.
  */
-#if defined(CONFIG_DVB_STB6000) || (defined(CONFIG_DVB_STB6000_MODULE) \
-							&& defined(MODULE))
+#if IS_REACHABLE(CONFIG_DVB_STB6000)
 extern struct dvb_frontend *stb6000_attach(struct dvb_frontend *fe, int addr,
 					   struct i2c_adapter *i2c);
 #else

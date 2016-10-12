@@ -10,7 +10,7 @@
 #ifdef CONFIG_IPV6_MROUTE
 static inline int ip6_mroute_opt(int opt)
 {
-	return (opt >= MRT6_BASE) && (opt <= MRT6_BASE + 10);
+	return (opt >= MRT6_BASE) && (opt <= MRT6_MAX);
 }
 #else
 static inline int ip6_mroute_opt(int opt)
@@ -92,6 +92,7 @@ struct mfc6_cache {
 			unsigned long bytes;
 			unsigned long pkt;
 			unsigned long wrong_if;
+			unsigned long lastuse;
 			unsigned char ttls[MAXMIFS];	/* TTL thresholds		*/
 		} res;
 	} mfc_un;
@@ -115,7 +116,7 @@ struct mfc6_cache {
 
 struct rtmsg;
 extern int ip6mr_get_route(struct net *net, struct sk_buff *skb,
-			   struct rtmsg *rtm, int nowait);
+			   struct rtmsg *rtm, int nowait, u32 portid);
 
 #ifdef CONFIG_IPV6_MROUTE
 extern struct sock *mroute6_socket(struct net *net, struct sk_buff *skb);

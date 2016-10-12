@@ -130,7 +130,6 @@ static int afs_vlocation_access_vl_by_id(struct afs_vlocation *vl,
 					/* second+ BUSY - sleep a little bit */
 					set_current_state(TASK_UNINTERRUPTIBLE);
 					schedule_timeout(1);
-					__set_current_state(TASK_RUNNING);
 				}
 				continue;
 			}
@@ -308,7 +307,8 @@ static int afs_vlocation_fill_in_record(struct afs_vlocation *vl,
 	/* see if we have an in-cache copy (will set vl->valid if there is) */
 #ifdef CONFIG_AFS_FSCACHE
 	vl->cache = fscache_acquire_cookie(vl->cell->cache,
-					   &afs_vlocation_cache_index_def, vl);
+					   &afs_vlocation_cache_index_def, vl,
+					   true);
 #endif
 
 	if (vl->valid) {
@@ -594,8 +594,8 @@ static void afs_vlocation_reaper(struct work_struct *work)
  */
 int __init afs_vlocation_update_init(void)
 {
-	afs_vlocation_update_worker =
-		create_singlethread_workqueue("kafs_vlupdated");
+	afs_vlocation_update_worker = alloc_workqueue("kafs_vlupdated",
+						      WQ_MEM_RECLAIM, 0);
 	return afs_vlocation_update_worker ? 0 : -ENOMEM;
 }
 

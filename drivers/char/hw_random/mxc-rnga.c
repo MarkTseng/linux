@@ -141,12 +141,11 @@ static void mxc_rnga_cleanup(struct hwrng *rng)
 
 static int __init mxc_rnga_probe(struct platform_device *pdev)
 {
-	int err = -ENODEV;
-	struct resource *res, *mem;
+	int err;
+	struct resource *res;
 	struct mxc_rng *mxc_rng;
 
-	mxc_rng = devm_kzalloc(&pdev->dev, sizeof(struct mxc_rng),
-					GFP_KERNEL);
+	mxc_rng = devm_kzalloc(&pdev->dev, sizeof(*mxc_rng), GFP_KERNEL);
 	if (!mxc_rng)
 		return -ENOMEM;
 
@@ -160,27 +159,17 @@ static int __init mxc_rnga_probe(struct platform_device *pdev)
 	mxc_rng->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(mxc_rng->clk)) {
 		dev_err(&pdev->dev, "Could not get rng_clk!\n");
-		err = PTR_ERR(mxc_rng->clk);
-		goto out;
+		return PTR_ERR(mxc_rng->clk);
 	}
 
-	clk_prepare_enable(mxc_rng->clk);
+	err = clk_prepare_enable(mxc_rng->clk);
+	if (err)
+		return err;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		err = -ENOENT;
-		goto err_region;
-	}
-
-	mem = request_mem_region(res->start, resource_size(res), pdev->name);
-	if (mem == NULL) {
-		err = -EBUSY;
-		goto err_region;
-	}
-
-	mxc_rng->mem = ioremap(res->start, resource_size(res));
-	if (!mxc_rng->mem) {
-		err = -ENOMEM;
+	mxc_rng->mem = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(mxc_rng->mem)) {
+		err = PTR_ERR(mxc_rng->mem);
 		goto err_ioremap;
 	}
 
@@ -190,30 +179,18 @@ static int __init mxc_rnga_probe(struct platform_device *pdev)
 		goto err_ioremap;
 	}
 
-	dev_info(&pdev->dev, "MXC RNGA Registered.\n");
-
 	return 0;
 
 err_ioremap:
-	release_mem_region(res->start, resource_size(res));
-
-err_region:
 	clk_disable_unprepare(mxc_rng->clk);
-
-out:
 	return err;
 }
 
 static int __exit mxc_rnga_remove(struct platform_device *pdev)
 {
-	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	struct mxc_rng *mxc_rng = platform_get_drvdata(pdev);
 
 	hwrng_unregister(&mxc_rng->rng);
-
-	iounmap(mxc_rng->mem);
-
-	release_mem_region(res->start, resource_size(res));
 
 	clk_disable_unprepare(mxc_rng->clk);
 
@@ -223,23 +200,11 @@ static int __exit mxc_rnga_remove(struct platform_device *pdev)
 static struct platform_driver mxc_rnga_driver = {
 	.driver = {
 		   .name = "mxc_rnga",
-		   .owner = THIS_MODULE,
 		   },
 	.remove = __exit_p(mxc_rnga_remove),
 };
 
-static int __init mod_init(void)
-{
-	return platform_driver_probe(&mxc_rnga_driver, mxc_rnga_probe);
-}
-
-static void __exit mod_exit(void)
-{
-	platform_driver_unregister(&mxc_rnga_driver);
-}
-
-module_init(mod_init);
-module_exit(mod_exit);
+module_platform_driver_probe(mxc_rnga_driver, mxc_rnga_probe);
 
 MODULE_AUTHOR("Freescale Semiconductor, Inc.");
 MODULE_DESCRIPTION("H/W RNGA driver for i.MX");

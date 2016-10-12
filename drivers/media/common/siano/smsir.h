@@ -30,8 +30,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <linux/input.h>
 #include <media/rc-core.h>
 
-#define IR_DEFAULT_TIMEOUT		100
-
 struct smscore_device_t;
 
 struct ir_t {
@@ -40,7 +38,6 @@ struct ir_t {
 	char phys[32];
 
 	char *rc_codes;
-	u64 protocol;
 
 	u32 timeout;
 	u32 controller;

@@ -7,22 +7,26 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#include <linux/clk/mmp.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/io.h>
+#include <linux/irq.h>
+#include <linux/irqchip/mmp.h>
 #include <linux/platform_device.h>
 
 #include <asm/hardware/cache-tauros2.h>
 #include <asm/mach/time.h>
-#include <mach/addr-map.h>
-#include <mach/regs-apbc.h>
-#include <mach/cputype.h>
-#include <mach/irqs.h>
-#include <mach/dma.h>
-#include <mach/mfp.h>
-#include <mach/devices.h>
+#include "addr-map.h"
+#include "regs-apbc.h"
+#include "cputype.h"
+#include "irqs.h"
+#include "mfp.h"
+#include "devices.h"
+#include "pm-pxa910.h"
+#include "pxa910.h"
 
 #include "common.h"
 
@@ -79,6 +83,9 @@ static struct mfp_addr_map pxa910_mfp_addr_map[] __initdata =
 void __init pxa910_init_irq(void)
 {
 	icu_init_irq();
+#ifdef CONFIG_PM
+	icu_irq_chip.irq_set_wake = pxa910_set_wake;
+#endif
 }
 
 static int __init pxa910_init(void)
@@ -89,8 +96,10 @@ static int __init pxa910_init(void)
 #endif
 		mfp_init_base(MFPR_VIRT_BASE);
 		mfp_init_addr(pxa910_mfp_addr_map);
-		pxa_init_dma(IRQ_PXA910_DMA_INT0, 32);
-		pxa910_clk_init();
+		pxa910_clk_init(APB_PHYS_BASE + 0x50000,
+				AXI_PHYS_BASE + 0x82800,
+				APB_PHYS_BASE + 0x15000,
+				APB_PHYS_BASE + 0x3b000);
 	}
 
 	return 0;
@@ -101,7 +110,7 @@ postcore_initcall(pxa910_init);
 #define TIMER_CLK_RST	(APBC_APBCLK | APBC_FNCLK | APBC_FNCLKSEL(3))
 #define APBC_TIMERS	APBC_REG(0x34)
 
-static void __init pxa910_timer_init(void)
+void __init pxa910_timer_init(void)
 {
 	/* reset and configure */
 	__raw_writel(APBC_APBCLK | APBC_RST, APBC_TIMERS);
@@ -109,10 +118,6 @@ static void __init pxa910_timer_init(void)
 
 	timer_init(IRQ_PXA910_AP1_TIMER1);
 }
-
-struct sys_timer pxa910_timer = {
-	.init	= pxa910_timer_init,
-};
 
 /* on-chip devices */
 
@@ -138,6 +143,9 @@ PXA910_DEVICE(pwm2, "pxa910-pwm", 1, NONE, 0xd401a400, 0x10);
 PXA910_DEVICE(pwm3, "pxa910-pwm", 2, NONE, 0xd401a800, 0x10);
 PXA910_DEVICE(pwm4, "pxa910-pwm", 3, NONE, 0xd401ac00, 0x10);
 PXA910_DEVICE(nand, "pxa3xx-nand", -1, NAND, 0xd4283000, 0x80, 97, 99);
+PXA910_DEVICE(disp, "mmp-disp", 0, LCD, 0xd420b000, 0x1ec);
+PXA910_DEVICE(fb, "mmp-fb", -1, NONE, 0, 0);
+PXA910_DEVICE(panel, "tpo-hvga", -1, NONE, 0, 0);
 
 struct resource pxa910_resource_gpio[] = {
 	{
@@ -153,7 +161,7 @@ struct resource pxa910_resource_gpio[] = {
 };
 
 struct platform_device pxa910_device_gpio = {
-	.name		= "pxa-gpio",
+	.name		= "mmp-gpio",
 	.id		= -1,
 	.num_resources	= ARRAY_SIZE(pxa910_resource_gpio),
 	.resource	= pxa910_resource_gpio,

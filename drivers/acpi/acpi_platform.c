@@ -13,13 +13,39 @@
 
 #include <linux/acpi.h>
 #include <linux/device.h>
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/dma-mapping.h>
+#include <linux/pci.h>
 #include <linux/platform_device.h>
 
 #include "internal.h"
 
 ACPI_MODULE_NAME("platform");
+
+static const struct acpi_device_id forbidden_id_list[] = {
+	{"PNP0000", 0},	/* PIC */
+	{"PNP0100", 0},	/* Timer */
+	{"PNP0200", 0},	/* AT DMA Controller */
+	{"", 0},
+};
+
+static void acpi_platform_fill_resource(struct acpi_device *adev,
+	const struct resource *src, struct resource *dest)
+{
+	struct device *parent;
+
+	*dest = *src;
+
+	/*
+	 * If the device has parent we need to take its resources into
+	 * account as well because this device might consume part of those.
+	 */
+	parent = acpi_get_first_physical_node(adev->parent);
+	if (parent && dev_is_pci(parent))
+		dest->parent = pci_find_resource(to_pci_dev(parent), dest);
+}
 
 /**
  * acpi_create_platform_device - Create platform device for ACPI device node
@@ -29,38 +55,43 @@ ACPI_MODULE_NAME("platform");
  * that's the case, create and register a platform device, populate its common
  * resources and returns a pointer to it.  Otherwise, return %NULL.
  *
- * The platform device's name will be taken from the @adev's _HID and _UID.
+ * Name of the platform device will be the same as @adev's.
  */
 struct platform_device *acpi_create_platform_device(struct acpi_device *adev)
 {
 	struct platform_device *pdev = NULL;
-	struct acpi_device *acpi_parent;
 	struct platform_device_info pdevinfo;
-	struct resource_list_entry *rentry;
+	struct resource_entry *rentry;
 	struct list_head resource_list;
-	struct resource *resources;
+	struct resource *resources = NULL;
 	int count;
 
 	/* If the ACPI node already has a physical device attached, skip it. */
 	if (adev->physical_node_count)
 		return NULL;
 
+	if (!acpi_match_device_ids(adev, forbidden_id_list))
+		return ERR_PTR(-EINVAL);
+
 	INIT_LIST_HEAD(&resource_list);
 	count = acpi_dev_get_resources(adev, &resource_list, NULL, NULL);
-	if (count <= 0)
+	if (count < 0) {
 		return NULL;
+	} else if (count > 0) {
+		resources = kzalloc(count * sizeof(struct resource),
+				    GFP_KERNEL);
+		if (!resources) {
+			dev_err(&adev->dev, "No memory for resources\n");
+			acpi_dev_free_resource_list(&resource_list);
+			return ERR_PTR(-ENOMEM);
+		}
+		count = 0;
+		list_for_each_entry(rentry, &resource_list, node)
+			acpi_platform_fill_resource(adev, rentry->res,
+						    &resources[count++]);
 
-	resources = kmalloc(count * sizeof(struct resource), GFP_KERNEL);
-	if (!resources) {
-		dev_err(&adev->dev, "No memory for resources\n");
 		acpi_dev_free_resource_list(&resource_list);
-		return NULL;
 	}
-	count = 0;
-	list_for_each_entry(rentry, &resource_list, node)
-		resources[count++] = rentry->res;
-
-	acpi_dev_free_resource_list(&resource_list);
 
 	memset(&pdevinfo, 0, sizeof(pdevinfo));
 	/*
@@ -68,37 +99,28 @@ struct platform_device *acpi_create_platform_device(struct acpi_device *adev)
 	 * attached to it, that physical device should be the parent of the
 	 * platform device we are about to create.
 	 */
-	pdevinfo.parent = NULL;
-	acpi_parent = adev->parent;
-	if (acpi_parent) {
-		struct acpi_device_physical_node *entry;
-		struct list_head *list;
-
-		mutex_lock(&acpi_parent->physical_node_lock);
-		list = &acpi_parent->physical_node_list;
-		if (!list_empty(list)) {
-			entry = list_first_entry(list,
-					struct acpi_device_physical_node,
-					node);
-			pdevinfo.parent = entry->dev;
-		}
-		mutex_unlock(&acpi_parent->physical_node_lock);
-	}
+	pdevinfo.parent = adev->parent ?
+		acpi_get_first_physical_node(adev->parent) : NULL;
 	pdevinfo.name = dev_name(&adev->dev);
 	pdevinfo.id = -1;
 	pdevinfo.res = resources;
 	pdevinfo.num_res = count;
-	pdevinfo.acpi_node.handle = adev->handle;
+	pdevinfo.fwnode = acpi_fwnode_handle(adev);
+
+	if (acpi_dma_supported(adev))
+		pdevinfo.dma_mask = DMA_BIT_MASK(32);
+	else
+		pdevinfo.dma_mask = 0;
+
 	pdev = platform_device_register_full(&pdevinfo);
-	if (IS_ERR(pdev)) {
+	if (IS_ERR(pdev))
 		dev_err(&adev->dev, "platform device creation failed: %ld\n",
 			PTR_ERR(pdev));
-		pdev = NULL;
-	} else {
+	else
 		dev_dbg(&adev->dev, "created platform device %s\n",
 			dev_name(&pdev->dev));
-	}
 
 	kfree(resources);
 	return pdev;
 }
+EXPORT_SYMBOL_GPL(acpi_create_platform_device);

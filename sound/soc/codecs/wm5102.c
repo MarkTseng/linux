@@ -28,6 +28,7 @@
 
 #include <linux/mfd/arizona/core.h>
 #include <linux/mfd/arizona/registers.h>
+#include <asm/unaligned.h>
 
 #include "arizona.h"
 #include "wm5102.h"
@@ -36,15 +37,13 @@
 struct wm5102_priv {
 	struct arizona_priv core;
 	struct arizona_fll fll[2];
-
-	unsigned int spk_ena:2;
-	unsigned int spk_ena_pending:1;
 };
 
 static DECLARE_TLV_DB_SCALE(ana_tlv, 0, 100, 0);
 static DECLARE_TLV_DB_SCALE(eq_tlv, -1200, 100, 0);
 static DECLARE_TLV_DB_SCALE(digital_tlv, -6400, 50, 0);
-static DECLARE_TLV_DB_SCALE(noise_tlv, 0, 600, 0);
+static DECLARE_TLV_DB_SCALE(noise_tlv, -13200, 600, 0);
+static DECLARE_TLV_DB_SCALE(ng_tlv, -10200, 600, 0);
 
 static const struct wm_adsp_region wm5102_dsp1_regions[] = {
 	{ .type = WMFW_ADSP2_PM, .base = 0x100000 },
@@ -572,12 +571,19 @@ static const struct reg_default wm5102_sysclk_reva_patch[] = {
 	{ 0x025e, 0x0112 },
 };
 
+static const struct reg_default wm5102_sysclk_revb_patch[] = {
+	{ 0x3081, 0x08FE },
+	{ 0x3083, 0x00ED },
+	{ 0x30C1, 0x08FE },
+	{ 0x30C3, 0x00ED },
+};
+
 static int wm5102_sysclk_ev(struct snd_soc_dapm_widget *w,
 			    struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_codec *codec = w->codec;
-	struct arizona *arizona = dev_get_drvdata(codec->dev);
-	struct regmap *regmap = codec->control_data;
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
+	struct regmap *regmap = arizona->regmap;
 	const struct reg_default *patch = NULL;
 	int i, patch_size;
 
@@ -586,22 +592,159 @@ static int wm5102_sysclk_ev(struct snd_soc_dapm_widget *w,
 		patch = wm5102_sysclk_reva_patch;
 		patch_size = ARRAY_SIZE(wm5102_sysclk_reva_patch);
 		break;
+	default:
+		patch = wm5102_sysclk_revb_patch;
+		patch_size = ARRAY_SIZE(wm5102_sysclk_revb_patch);
+		break;
 	}
 
 	switch (event) {
 	case SND_SOC_DAPM_POST_PMU:
 		if (patch)
 			for (i = 0; i < patch_size; i++)
-				regmap_write(regmap, patch[i].reg,
-					     patch[i].def);
+				regmap_write_async(regmap, patch[i].reg,
+						   patch[i].def);
+		break;
+	case SND_SOC_DAPM_PRE_PMD:
+		break;
+	default:
+		return 0;
+	}
+
+	return arizona_dvfs_sysclk_ev(w, kcontrol, event);
+}
+
+static int wm5102_adsp_power_ev(struct snd_soc_dapm_widget *w,
+		   struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
+	unsigned int v = 0;
+	int ret;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		ret = regmap_read(arizona->regmap, ARIZONA_SYSTEM_CLOCK_1, &v);
+		if (ret != 0) {
+			dev_err(codec->dev,
+				"Failed to read SYSCLK state: %d\n", ret);
+			return -EIO;
+		}
+
+		v = (v & ARIZONA_SYSCLK_FREQ_MASK) >> ARIZONA_SYSCLK_FREQ_SHIFT;
+
+		if (v >= 3) {
+			ret = arizona_dvfs_up(codec, ARIZONA_DVFS_ADSP1_RQ);
+			if (ret) {
+				dev_err(codec->dev,
+					"Failed to raise DVFS: %d\n", ret);
+				return ret;
+			}
+		}
+		break;
+
+	case SND_SOC_DAPM_POST_PMD:
+		ret = arizona_dvfs_down(codec, ARIZONA_DVFS_ADSP1_RQ);
+		if (ret)
+			dev_warn(codec->dev,
+				 "Failed to lower DVFS: %d\n", ret);
 		break;
 
 	default:
 		break;
 	}
 
+	return wm_adsp2_early_event(w, kcontrol, event, v);
+}
+
+static int wm5102_out_comp_coeff_get(struct snd_kcontrol *kcontrol,
+				     struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
+
+	mutex_lock(&arizona->dac_comp_lock);
+	put_unaligned_be16(arizona->dac_comp_coeff,
+			   ucontrol->value.bytes.data);
+	mutex_unlock(&arizona->dac_comp_lock);
+
 	return 0;
 }
+
+static int wm5102_out_comp_coeff_put(struct snd_kcontrol *kcontrol,
+				     struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
+
+	mutex_lock(&arizona->dac_comp_lock);
+	memcpy(&arizona->dac_comp_coeff, ucontrol->value.bytes.data,
+	       sizeof(arizona->dac_comp_coeff));
+	arizona->dac_comp_coeff = be16_to_cpu(arizona->dac_comp_coeff);
+	mutex_unlock(&arizona->dac_comp_lock);
+
+	return 0;
+}
+
+static int wm5102_out_comp_switch_get(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
+
+	mutex_lock(&arizona->dac_comp_lock);
+	ucontrol->value.integer.value[0] = arizona->dac_comp_enabled;
+	mutex_unlock(&arizona->dac_comp_lock);
+
+	return 0;
+}
+
+static int wm5102_out_comp_switch_put(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
+
+	mutex_lock(&arizona->dac_comp_lock);
+	arizona->dac_comp_enabled = ucontrol->value.integer.value[0];
+	mutex_unlock(&arizona->dac_comp_lock);
+
+	return 0;
+}
+
+static const char *wm5102_osr_text[] = {
+	"Low power", "Normal", "High performance",
+};
+
+static const unsigned int wm5102_osr_val[] = {
+	0x0, 0x3, 0x5,
+};
+
+static const struct soc_enum wm5102_hpout_osr[] = {
+	SOC_VALUE_ENUM_SINGLE(ARIZONA_OUTPUT_PATH_CONFIG_1L,
+			      ARIZONA_OUT1_OSR_SHIFT, 0x7,
+			      ARRAY_SIZE(wm5102_osr_text),
+			      wm5102_osr_text, wm5102_osr_val),
+	SOC_VALUE_ENUM_SINGLE(ARIZONA_OUTPUT_PATH_CONFIG_2L,
+			      ARIZONA_OUT2_OSR_SHIFT, 0x7,
+			      ARRAY_SIZE(wm5102_osr_text),
+			      wm5102_osr_text, wm5102_osr_val),
+	SOC_VALUE_ENUM_SINGLE(ARIZONA_OUTPUT_PATH_CONFIG_3L,
+			      ARIZONA_OUT3_OSR_SHIFT, 0x7,
+			      ARRAY_SIZE(wm5102_osr_text),
+			      wm5102_osr_text, wm5102_osr_val),
+};
+
+#define WM5102_NG_SRC(name, base) \
+	SOC_SINGLE(name " NG HPOUT1L Switch",  base, 0, 1, 0), \
+	SOC_SINGLE(name " NG HPOUT1R Switch",  base, 1, 1, 0), \
+	SOC_SINGLE(name " NG HPOUT2L Switch",  base, 2, 1, 0), \
+	SOC_SINGLE(name " NG HPOUT2R Switch",  base, 3, 1, 0), \
+	SOC_SINGLE(name " NG EPOUT Switch",    base, 4, 1, 0), \
+	SOC_SINGLE(name " NG SPKOUTL Switch",  base, 6, 1, 0), \
+	SOC_SINGLE(name " NG SPKOUTR Switch",  base, 7, 1, 0), \
+	SOC_SINGLE(name " NG SPKDAT1L Switch", base, 8, 1, 0), \
+	SOC_SINGLE(name " NG SPKDAT1R Switch", base, 9, 1, 0)
 
 static const struct snd_kcontrol_new wm5102_snd_controls[] = {
 SOC_SINGLE("IN1 High Performance Switch", ARIZONA_IN1L_CONTROL,
@@ -611,32 +754,31 @@ SOC_SINGLE("IN2 High Performance Switch", ARIZONA_IN2L_CONTROL,
 SOC_SINGLE("IN3 High Performance Switch", ARIZONA_IN3L_CONTROL,
 	   ARIZONA_IN3_OSR_SHIFT, 1, 0),
 
-SOC_DOUBLE_R_RANGE_TLV("IN1 Volume", ARIZONA_IN1L_CONTROL,
-		       ARIZONA_IN1R_CONTROL,
-		       ARIZONA_IN1L_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
-SOC_DOUBLE_R_RANGE_TLV("IN2 Volume", ARIZONA_IN2L_CONTROL,
-		       ARIZONA_IN2R_CONTROL,
-		       ARIZONA_IN2L_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
-SOC_DOUBLE_R_RANGE_TLV("IN3 Volume", ARIZONA_IN3L_CONTROL,
-		       ARIZONA_IN3R_CONTROL,
-		       ARIZONA_IN3L_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
+SOC_SINGLE_RANGE_TLV("IN1L Volume", ARIZONA_IN1L_CONTROL,
+		     ARIZONA_IN1L_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
+SOC_SINGLE_RANGE_TLV("IN1R Volume", ARIZONA_IN1R_CONTROL,
+		     ARIZONA_IN1R_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
+SOC_SINGLE_RANGE_TLV("IN2L Volume", ARIZONA_IN2L_CONTROL,
+		     ARIZONA_IN2L_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
+SOC_SINGLE_RANGE_TLV("IN2R Volume", ARIZONA_IN2R_CONTROL,
+		     ARIZONA_IN2R_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
+SOC_SINGLE_RANGE_TLV("IN3L Volume", ARIZONA_IN3L_CONTROL,
+		     ARIZONA_IN3L_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
+SOC_SINGLE_RANGE_TLV("IN3R Volume", ARIZONA_IN3R_CONTROL,
+		     ARIZONA_IN3R_PGA_VOL_SHIFT, 0x40, 0x5f, 0, ana_tlv),
 
-SOC_DOUBLE_R("IN1 Digital Switch", ARIZONA_ADC_DIGITAL_VOLUME_1L,
-	     ARIZONA_ADC_DIGITAL_VOLUME_1R, ARIZONA_IN1L_MUTE_SHIFT, 1, 1),
-SOC_DOUBLE_R("IN2 Digital Switch", ARIZONA_ADC_DIGITAL_VOLUME_2L,
-	     ARIZONA_ADC_DIGITAL_VOLUME_2R, ARIZONA_IN2L_MUTE_SHIFT, 1, 1),
-SOC_DOUBLE_R("IN3 Digital Switch", ARIZONA_ADC_DIGITAL_VOLUME_3L,
-	     ARIZONA_ADC_DIGITAL_VOLUME_3R, ARIZONA_IN3L_MUTE_SHIFT, 1, 1),
-
-SOC_DOUBLE_R_TLV("IN1 Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_1L,
-		 ARIZONA_ADC_DIGITAL_VOLUME_1R, ARIZONA_IN1L_DIG_VOL_SHIFT,
-		 0xbf, 0, digital_tlv),
-SOC_DOUBLE_R_TLV("IN2 Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_2L,
-		 ARIZONA_ADC_DIGITAL_VOLUME_2R, ARIZONA_IN2L_DIG_VOL_SHIFT,
-		 0xbf, 0, digital_tlv),
-SOC_DOUBLE_R_TLV("IN3 Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_3L,
-		 ARIZONA_ADC_DIGITAL_VOLUME_3R, ARIZONA_IN3L_DIG_VOL_SHIFT,
-		 0xbf, 0, digital_tlv),
+SOC_SINGLE_TLV("IN1L Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_1L,
+	       ARIZONA_IN1L_DIG_VOL_SHIFT, 0xbf, 0, digital_tlv),
+SOC_SINGLE_TLV("IN1R Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_1R,
+	       ARIZONA_IN1R_DIG_VOL_SHIFT, 0xbf, 0, digital_tlv),
+SOC_SINGLE_TLV("IN2L Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_2L,
+	       ARIZONA_IN2L_DIG_VOL_SHIFT, 0xbf, 0, digital_tlv),
+SOC_SINGLE_TLV("IN2R Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_2R,
+	       ARIZONA_IN2R_DIG_VOL_SHIFT, 0xbf, 0, digital_tlv),
+SOC_SINGLE_TLV("IN3L Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_3L,
+	       ARIZONA_IN3L_DIG_VOL_SHIFT, 0xbf, 0, digital_tlv),
+SOC_SINGLE_TLV("IN3R Digital Volume", ARIZONA_ADC_DIGITAL_VOLUME_3R,
+	       ARIZONA_IN3R_DIG_VOL_SHIFT, 0xbf, 0, digital_tlv),
 
 SOC_ENUM("Input Ramp Up", arizona_in_vi_ramp),
 SOC_ENUM("Input Ramp Down", arizona_in_vd_ramp),
@@ -646,15 +788,7 @@ ARIZONA_MIXER_CONTROLS("EQ2", ARIZONA_EQ2MIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("EQ3", ARIZONA_EQ3MIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("EQ4", ARIZONA_EQ4MIX_INPUT_1_SOURCE),
 
-SND_SOC_BYTES_MASK("EQ1 Coefficeints", ARIZONA_EQ1_1, 21,
-		   ARIZONA_EQ1_ENA_MASK),
-SND_SOC_BYTES_MASK("EQ2 Coefficeints", ARIZONA_EQ2_1, 21,
-		   ARIZONA_EQ2_ENA_MASK),
-SND_SOC_BYTES_MASK("EQ3 Coefficeints", ARIZONA_EQ3_1, 21,
-		   ARIZONA_EQ3_ENA_MASK),
-SND_SOC_BYTES_MASK("EQ4 Coefficeints", ARIZONA_EQ4_1, 21,
-		   ARIZONA_EQ4_ENA_MASK),
-
+ARIZONA_EQ_CONTROL("EQ1 Coefficients", ARIZONA_EQ1_2),
 SOC_SINGLE_TLV("EQ1 B1 Volume", ARIZONA_EQ1_1, ARIZONA_EQ1_B1_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 SOC_SINGLE_TLV("EQ1 B2 Volume", ARIZONA_EQ1_1, ARIZONA_EQ1_B2_GAIN_SHIFT,
@@ -666,6 +800,7 @@ SOC_SINGLE_TLV("EQ1 B4 Volume", ARIZONA_EQ1_2, ARIZONA_EQ1_B4_GAIN_SHIFT,
 SOC_SINGLE_TLV("EQ1 B5 Volume", ARIZONA_EQ1_2, ARIZONA_EQ1_B5_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 
+ARIZONA_EQ_CONTROL("EQ2 Coefficients", ARIZONA_EQ2_2),
 SOC_SINGLE_TLV("EQ2 B1 Volume", ARIZONA_EQ2_1, ARIZONA_EQ2_B1_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 SOC_SINGLE_TLV("EQ2 B2 Volume", ARIZONA_EQ2_1, ARIZONA_EQ2_B2_GAIN_SHIFT,
@@ -677,6 +812,7 @@ SOC_SINGLE_TLV("EQ2 B4 Volume", ARIZONA_EQ2_2, ARIZONA_EQ2_B4_GAIN_SHIFT,
 SOC_SINGLE_TLV("EQ2 B5 Volume", ARIZONA_EQ2_2, ARIZONA_EQ2_B5_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 
+ARIZONA_EQ_CONTROL("EQ3 Coefficients", ARIZONA_EQ3_2),
 SOC_SINGLE_TLV("EQ3 B1 Volume", ARIZONA_EQ3_1, ARIZONA_EQ3_B1_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 SOC_SINGLE_TLV("EQ3 B2 Volume", ARIZONA_EQ3_1, ARIZONA_EQ3_B2_GAIN_SHIFT,
@@ -688,6 +824,7 @@ SOC_SINGLE_TLV("EQ3 B4 Volume", ARIZONA_EQ3_2, ARIZONA_EQ3_B4_GAIN_SHIFT,
 SOC_SINGLE_TLV("EQ3 B5 Volume", ARIZONA_EQ3_2, ARIZONA_EQ3_B5_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 
+ARIZONA_EQ_CONTROL("EQ4 Coefficients", ARIZONA_EQ4_2),
 SOC_SINGLE_TLV("EQ4 B1 Volume", ARIZONA_EQ4_1, ARIZONA_EQ4_B1_GAIN_SHIFT,
 	       24, 0, eq_tlv),
 SOC_SINGLE_TLV("EQ4 B2 Volume", ARIZONA_EQ4_1, ARIZONA_EQ4_B2_GAIN_SHIFT,
@@ -710,10 +847,10 @@ ARIZONA_MIXER_CONTROLS("LHPF2", ARIZONA_HPLP2MIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("LHPF3", ARIZONA_HPLP3MIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("LHPF4", ARIZONA_HPLP4MIX_INPUT_1_SOURCE),
 
-SND_SOC_BYTES("LHPF1 Coefficients", ARIZONA_HPLPF1_2, 1),
-SND_SOC_BYTES("LHPF2 Coefficients", ARIZONA_HPLPF2_2, 1),
-SND_SOC_BYTES("LHPF3 Coefficients", ARIZONA_HPLPF3_2, 1),
-SND_SOC_BYTES("LHPF4 Coefficients", ARIZONA_HPLPF4_2, 1),
+ARIZONA_LHPF_CONTROL("LHPF1 Coefficients", ARIZONA_HPLPF1_2),
+ARIZONA_LHPF_CONTROL("LHPF2 Coefficients", ARIZONA_HPLPF2_2),
+ARIZONA_LHPF_CONTROL("LHPF3 Coefficients", ARIZONA_HPLPF3_2),
+ARIZONA_LHPF_CONTROL("LHPF4 Coefficients", ARIZONA_HPLPF4_2),
 
 ARIZONA_MIXER_CONTROLS("DSP1L", ARIZONA_DSP1LMIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("DSP1R", ARIZONA_DSP1RMIX_INPUT_1_SOURCE),
@@ -722,6 +859,9 @@ SOC_ENUM("LHPF1 Mode", arizona_lhpf1_mode),
 SOC_ENUM("LHPF2 Mode", arizona_lhpf2_mode),
 SOC_ENUM("LHPF3 Mode", arizona_lhpf3_mode),
 SOC_ENUM("LHPF4 Mode", arizona_lhpf4_mode),
+
+SOC_ENUM("ISRC1 FSL", arizona_isrc_fsl[0]),
+SOC_ENUM("ISRC2 FSL", arizona_isrc_fsl[1]),
 
 ARIZONA_MIXER_CONTROLS("Mic", ARIZONA_MICMIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("Noise", ARIZONA_NOISEMIX_INPUT_1_SOURCE),
@@ -739,12 +879,14 @@ ARIZONA_MIXER_CONTROLS("SPKOUTR", ARIZONA_OUT4RMIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("SPKDAT1L", ARIZONA_OUT5LMIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("SPKDAT1R", ARIZONA_OUT5RMIX_INPUT_1_SOURCE),
 
+SOC_SINGLE("Speaker High Performance Switch", ARIZONA_OUTPUT_PATH_CONFIG_4L,
+	   ARIZONA_OUT4_OSR_SHIFT, 1, 0),
 SOC_SINGLE("SPKDAT1 High Performance Switch", ARIZONA_OUTPUT_PATH_CONFIG_5L,
 	   ARIZONA_OUT5_OSR_SHIFT, 1, 0),
 
 SOC_DOUBLE_R("HPOUT1 Digital Switch", ARIZONA_DAC_DIGITAL_VOLUME_1L,
 	     ARIZONA_DAC_DIGITAL_VOLUME_1R, ARIZONA_OUT1L_MUTE_SHIFT, 1, 1),
-SOC_DOUBLE_R("OUT2 Digital Switch", ARIZONA_DAC_DIGITAL_VOLUME_2L,
+SOC_DOUBLE_R("HPOUT2 Digital Switch", ARIZONA_DAC_DIGITAL_VOLUME_2L,
 	     ARIZONA_DAC_DIGITAL_VOLUME_2R, ARIZONA_OUT2L_MUTE_SHIFT, 1, 1),
 SOC_SINGLE("EPOUT Digital Switch", ARIZONA_DAC_DIGITAL_VOLUME_3L,
 	   ARIZONA_OUT3L_MUTE_SHIFT, 1, 1),
@@ -756,7 +898,7 @@ SOC_DOUBLE_R("SPKDAT1 Digital Switch", ARIZONA_DAC_DIGITAL_VOLUME_5L,
 SOC_DOUBLE_R_TLV("HPOUT1 Digital Volume", ARIZONA_DAC_DIGITAL_VOLUME_1L,
 		 ARIZONA_DAC_DIGITAL_VOLUME_1R, ARIZONA_OUT1L_VOL_SHIFT,
 		 0xbf, 0, digital_tlv),
-SOC_DOUBLE_R_TLV("OUT2 Digital Volume", ARIZONA_DAC_DIGITAL_VOLUME_2L,
+SOC_DOUBLE_R_TLV("HPOUT2 Digital Volume", ARIZONA_DAC_DIGITAL_VOLUME_2L,
 		 ARIZONA_DAC_DIGITAL_VOLUME_2R, ARIZONA_OUT2L_VOL_SHIFT,
 		 0xbf, 0, digital_tlv),
 SOC_SINGLE_TLV("EPOUT Digital Volume", ARIZONA_DAC_DIGITAL_VOLUME_3L,
@@ -768,11 +910,50 @@ SOC_DOUBLE_R_TLV("SPKDAT1 Digital Volume", ARIZONA_DAC_DIGITAL_VOLUME_5L,
 		 ARIZONA_DAC_DIGITAL_VOLUME_5R, ARIZONA_OUT5L_VOL_SHIFT,
 		 0xbf, 0, digital_tlv),
 
+SOC_ENUM("HPOUT1 OSR", wm5102_hpout_osr[0]),
+SOC_ENUM("HPOUT2 OSR", wm5102_hpout_osr[1]),
+SOC_ENUM("EPOUT OSR", wm5102_hpout_osr[2]),
+
+SOC_DOUBLE("HPOUT1 DRE Switch", ARIZONA_DRE_ENABLE,
+	   ARIZONA_DRE1L_ENA_SHIFT, ARIZONA_DRE1R_ENA_SHIFT, 1, 0),
+SOC_DOUBLE("HPOUT2 DRE Switch", ARIZONA_DRE_ENABLE,
+	   ARIZONA_DRE2L_ENA_SHIFT, ARIZONA_DRE2R_ENA_SHIFT, 1, 0),
+SOC_SINGLE("EPOUT DRE Switch", ARIZONA_DRE_ENABLE,
+	   ARIZONA_DRE3L_ENA_SHIFT, 1, 0),
+
+SOC_SINGLE("DRE Threshold", ARIZONA_DRE_CONTROL_2,
+	   ARIZONA_DRE_T_LOW_SHIFT, 63, 0),
+
+SOC_SINGLE("DRE Low Level ABS", ARIZONA_DRE_CONTROL_3,
+	   ARIZONA_DRE_LOW_LEVEL_ABS_SHIFT, 15, 0),
+
 SOC_ENUM("Output Ramp Up", arizona_out_vi_ramp),
 SOC_ENUM("Output Ramp Down", arizona_out_vd_ramp),
 
 SOC_DOUBLE("SPKDAT1 Switch", ARIZONA_PDM_SPK1_CTRL_1, ARIZONA_SPK1L_MUTE_SHIFT,
 	   ARIZONA_SPK1R_MUTE_SHIFT, 1, 1),
+
+SOC_SINGLE("Noise Gate Switch", ARIZONA_NOISE_GATE_CONTROL,
+	   ARIZONA_NGATE_ENA_SHIFT, 1, 0),
+SOC_SINGLE_TLV("Noise Gate Threshold Volume", ARIZONA_NOISE_GATE_CONTROL,
+	       ARIZONA_NGATE_THR_SHIFT, 7, 1, ng_tlv),
+SOC_ENUM("Noise Gate Hold", arizona_ng_hold),
+
+SND_SOC_BYTES_EXT("Output Compensation Coefficient", 2,
+		  wm5102_out_comp_coeff_get, wm5102_out_comp_coeff_put),
+
+SOC_SINGLE_EXT("Output Compensation Switch", 0, 0, 1, 0,
+	       wm5102_out_comp_switch_get, wm5102_out_comp_switch_put),
+
+WM5102_NG_SRC("HPOUT1L", ARIZONA_NOISE_GATE_SELECT_1L),
+WM5102_NG_SRC("HPOUT1R", ARIZONA_NOISE_GATE_SELECT_1R),
+WM5102_NG_SRC("HPOUT2L", ARIZONA_NOISE_GATE_SELECT_2L),
+WM5102_NG_SRC("HPOUT2R", ARIZONA_NOISE_GATE_SELECT_2R),
+WM5102_NG_SRC("EPOUT", ARIZONA_NOISE_GATE_SELECT_3L),
+WM5102_NG_SRC("SPKOUTL", ARIZONA_NOISE_GATE_SELECT_4L),
+WM5102_NG_SRC("SPKOUTR", ARIZONA_NOISE_GATE_SELECT_4R),
+WM5102_NG_SRC("SPKDAT1L", ARIZONA_NOISE_GATE_SELECT_5L),
+WM5102_NG_SRC("SPKDAT1R", ARIZONA_NOISE_GATE_SELECT_5R),
 
 ARIZONA_MIXER_CONTROLS("AIF1TX1", ARIZONA_AIF1TX1MIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("AIF1TX2", ARIZONA_AIF1TX2MIX_INPUT_1_SOURCE),
@@ -788,48 +969,16 @@ ARIZONA_MIXER_CONTROLS("AIF2TX2", ARIZONA_AIF2TX2MIX_INPUT_1_SOURCE),
 
 ARIZONA_MIXER_CONTROLS("AIF3TX1", ARIZONA_AIF3TX1MIX_INPUT_1_SOURCE),
 ARIZONA_MIXER_CONTROLS("AIF3TX2", ARIZONA_AIF3TX2MIX_INPUT_1_SOURCE),
+
+ARIZONA_MIXER_CONTROLS("SLIMTX1", ARIZONA_SLIMTX1MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX2", ARIZONA_SLIMTX2MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX3", ARIZONA_SLIMTX3MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX4", ARIZONA_SLIMTX4MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX5", ARIZONA_SLIMTX5MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX6", ARIZONA_SLIMTX6MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX7", ARIZONA_SLIMTX7MIX_INPUT_1_SOURCE),
+ARIZONA_MIXER_CONTROLS("SLIMTX8", ARIZONA_SLIMTX8MIX_INPUT_1_SOURCE),
 };
-
-static int wm5102_spk_ev(struct snd_soc_dapm_widget *w,
-			 struct snd_kcontrol *kcontrol,
-			 int event)
-{
-	struct snd_soc_codec *codec = w->codec;
-	struct arizona *arizona = dev_get_drvdata(codec->dev->parent);
-	struct wm5102_priv *wm5102 = snd_soc_codec_get_drvdata(codec);
-
-	if (arizona->rev < 1)
-		return 0;
-
-	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		if (!wm5102->spk_ena) {
-			snd_soc_write(codec, 0x4f5, 0x25a);
-			wm5102->spk_ena_pending = true;
-		}
-		break;
-	case SND_SOC_DAPM_POST_PMU:
-		if (wm5102->spk_ena_pending) {
-			msleep(75);
-			snd_soc_write(codec, 0x4f5, 0xda);
-			wm5102->spk_ena_pending = false;
-			wm5102->spk_ena++;
-		}
-		break;
-	case SND_SOC_DAPM_PRE_PMD:
-		wm5102->spk_ena--;
-		if (!wm5102->spk_ena)
-			snd_soc_write(codec, 0x4f5, 0x25a);
-		break;
-	case SND_SOC_DAPM_POST_PMD:
-		if (!wm5102->spk_ena)
-			snd_soc_write(codec, 0x4f5, 0x0da);
-		break;
-	}
-
-	return 0;
-}
-
 
 ARIZONA_MIXER_ENUMS(EQ1, ARIZONA_EQ1MIX_INPUT_1_SOURCE);
 ARIZONA_MIXER_ENUMS(EQ2, ARIZONA_EQ2MIX_INPUT_1_SOURCE);
@@ -875,10 +1024,31 @@ ARIZONA_MIXER_ENUMS(AIF2TX2, ARIZONA_AIF2TX2MIX_INPUT_1_SOURCE);
 ARIZONA_MIXER_ENUMS(AIF3TX1, ARIZONA_AIF3TX1MIX_INPUT_1_SOURCE);
 ARIZONA_MIXER_ENUMS(AIF3TX2, ARIZONA_AIF3TX2MIX_INPUT_1_SOURCE);
 
+ARIZONA_MIXER_ENUMS(SLIMTX1, ARIZONA_SLIMTX1MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX2, ARIZONA_SLIMTX2MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX3, ARIZONA_SLIMTX3MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX4, ARIZONA_SLIMTX4MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX5, ARIZONA_SLIMTX5MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX6, ARIZONA_SLIMTX6MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX7, ARIZONA_SLIMTX7MIX_INPUT_1_SOURCE);
+ARIZONA_MIXER_ENUMS(SLIMTX8, ARIZONA_SLIMTX8MIX_INPUT_1_SOURCE);
+
 ARIZONA_MUX_ENUMS(ASRC1L, ARIZONA_ASRC1LMIX_INPUT_1_SOURCE);
 ARIZONA_MUX_ENUMS(ASRC1R, ARIZONA_ASRC1RMIX_INPUT_1_SOURCE);
 ARIZONA_MUX_ENUMS(ASRC2L, ARIZONA_ASRC2LMIX_INPUT_1_SOURCE);
 ARIZONA_MUX_ENUMS(ASRC2R, ARIZONA_ASRC2RMIX_INPUT_1_SOURCE);
+
+ARIZONA_MUX_ENUMS(ISRC1INT1, ARIZONA_ISRC1INT1MIX_INPUT_1_SOURCE);
+ARIZONA_MUX_ENUMS(ISRC1INT2, ARIZONA_ISRC1INT2MIX_INPUT_1_SOURCE);
+
+ARIZONA_MUX_ENUMS(ISRC1DEC1, ARIZONA_ISRC1DEC1MIX_INPUT_1_SOURCE);
+ARIZONA_MUX_ENUMS(ISRC1DEC2, ARIZONA_ISRC1DEC2MIX_INPUT_1_SOURCE);
+
+ARIZONA_MUX_ENUMS(ISRC2INT1, ARIZONA_ISRC2INT1MIX_INPUT_1_SOURCE);
+ARIZONA_MUX_ENUMS(ISRC2INT2, ARIZONA_ISRC2INT2MIX_INPUT_1_SOURCE);
+
+ARIZONA_MUX_ENUMS(ISRC2DEC1, ARIZONA_ISRC2DEC1MIX_INPUT_1_SOURCE);
+ARIZONA_MUX_ENUMS(ISRC2DEC2, ARIZONA_ISRC2DEC2MIX_INPUT_1_SOURCE);
 
 ARIZONA_MIXER_ENUMS(DSP1L, ARIZONA_DSP1LMIX_INPUT_1_SOURCE);
 ARIZONA_MIXER_ENUMS(DSP1R, ARIZONA_DSP1RMIX_INPUT_1_SOURCE);
@@ -896,18 +1066,18 @@ static const unsigned int wm5102_aec_loopback_values[] = {
 
 static const struct soc_enum wm5102_aec_loopback =
 	SOC_VALUE_ENUM_SINGLE(ARIZONA_DAC_AEC_CONTROL_1,
-			      ARIZONA_AEC_LOOPBACK_SRC_SHIFT,
-			      ARIZONA_AEC_LOOPBACK_SRC_MASK,
+			      ARIZONA_AEC_LOOPBACK_SRC_SHIFT, 0xf,
 			      ARRAY_SIZE(wm5102_aec_loopback_texts),
 			      wm5102_aec_loopback_texts,
 			      wm5102_aec_loopback_values);
 
 static const struct snd_kcontrol_new wm5102_aec_loopback_mux =
-	SOC_DAPM_VALUE_ENUM("AEC Loopback", wm5102_aec_loopback);
+	SOC_DAPM_ENUM("AEC Loopback", wm5102_aec_loopback);
 
 static const struct snd_soc_dapm_widget wm5102_dapm_widgets[] = {
 SND_SOC_DAPM_SUPPLY("SYSCLK", ARIZONA_SYSTEM_CLOCK_1, ARIZONA_SYSCLK_ENA_SHIFT,
-		    0, wm5102_sysclk_ev, SND_SOC_DAPM_POST_PMU),
+		    0, wm5102_sysclk_ev,
+		    SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
 SND_SOC_DAPM_SUPPLY("ASYNCCLK", ARIZONA_ASYNC_CLOCK_1,
 		    ARIZONA_ASYNC_CLK_ENA_SHIFT, 0, NULL, 0),
 SND_SOC_DAPM_SUPPLY("OPCLK", ARIZONA_OUTPUT_SYSTEM_CLOCK,
@@ -933,24 +1103,32 @@ SND_SOC_DAPM_INPUT("IN2R"),
 SND_SOC_DAPM_INPUT("IN3L"),
 SND_SOC_DAPM_INPUT("IN3R"),
 
+SND_SOC_DAPM_OUTPUT("DRC1 Signal Activity"),
+
 SND_SOC_DAPM_PGA_E("IN1L PGA", ARIZONA_INPUT_ENABLES, ARIZONA_IN1L_ENA_SHIFT,
 		   0, NULL, 0, arizona_in_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("IN1R PGA", ARIZONA_INPUT_ENABLES, ARIZONA_IN1R_ENA_SHIFT,
 		   0, NULL, 0, arizona_in_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("IN2L PGA", ARIZONA_INPUT_ENABLES, ARIZONA_IN2L_ENA_SHIFT,
 		   0, NULL, 0, arizona_in_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("IN2R PGA", ARIZONA_INPUT_ENABLES, ARIZONA_IN2R_ENA_SHIFT,
 		   0, NULL, 0, arizona_in_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("IN3L PGA", ARIZONA_INPUT_ENABLES, ARIZONA_IN3L_ENA_SHIFT,
 		   0, NULL, 0, arizona_in_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("IN3R PGA", ARIZONA_INPUT_ENABLES, ARIZONA_IN3R_ENA_SHIFT,
 		   0, NULL, 0, arizona_in_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 
 SND_SOC_DAPM_SUPPLY("MICBIAS1", ARIZONA_MIC_BIAS_CTRL_1,
 		    ARIZONA_MICB1_ENA_SHIFT, 0, NULL, 0),
@@ -1002,6 +1180,26 @@ SND_SOC_DAPM_PGA("ASRC2L", ARIZONA_ASRC_ENABLE, ARIZONA_ASRC2L_ENA_SHIFT, 0,
 		 NULL, 0),
 SND_SOC_DAPM_PGA("ASRC2R", ARIZONA_ASRC_ENABLE, ARIZONA_ASRC2R_ENA_SHIFT, 0,
 		 NULL, 0),
+
+SND_SOC_DAPM_PGA("ISRC1INT1", ARIZONA_ISRC_1_CTRL_3,
+		 ARIZONA_ISRC1_INT0_ENA_SHIFT, 0, NULL, 0),
+SND_SOC_DAPM_PGA("ISRC1INT2", ARIZONA_ISRC_1_CTRL_3,
+		 ARIZONA_ISRC1_INT1_ENA_SHIFT, 0, NULL, 0),
+
+SND_SOC_DAPM_PGA("ISRC1DEC1", ARIZONA_ISRC_1_CTRL_3,
+		 ARIZONA_ISRC1_DEC0_ENA_SHIFT, 0, NULL, 0),
+SND_SOC_DAPM_PGA("ISRC1DEC2", ARIZONA_ISRC_1_CTRL_3,
+		 ARIZONA_ISRC1_DEC1_ENA_SHIFT, 0, NULL, 0),
+
+SND_SOC_DAPM_PGA("ISRC2INT1", ARIZONA_ISRC_2_CTRL_3,
+		 ARIZONA_ISRC2_INT0_ENA_SHIFT, 0, NULL, 0),
+SND_SOC_DAPM_PGA("ISRC2INT2", ARIZONA_ISRC_2_CTRL_3,
+		 ARIZONA_ISRC2_INT1_ENA_SHIFT, 0, NULL, 0),
+
+SND_SOC_DAPM_PGA("ISRC2DEC1", ARIZONA_ISRC_2_CTRL_3,
+		 ARIZONA_ISRC2_DEC0_ENA_SHIFT, 0, NULL, 0),
+SND_SOC_DAPM_PGA("ISRC2DEC2", ARIZONA_ISRC_2_CTRL_3,
+		 ARIZONA_ISRC2_DEC1_ENA_SHIFT, 0, NULL, 0),
 
 SND_SOC_DAPM_AIF_OUT("AIF1TX1", NULL, 0,
 		     ARIZONA_AIF1_TX_ENABLES, ARIZONA_AIF1TX1_ENA_SHIFT, 0),
@@ -1057,32 +1255,82 @@ SND_SOC_DAPM_AIF_IN("AIF3RX1", NULL, 0,
 SND_SOC_DAPM_AIF_IN("AIF3RX2", NULL, 0,
 		    ARIZONA_AIF3_RX_ENABLES, ARIZONA_AIF3RX2_ENA_SHIFT, 0),
 
+SND_SOC_DAPM_AIF_OUT("SLIMTX1", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX1_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX2", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX2_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX3", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX3_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX4", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX4_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX5", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX5_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX6", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX6_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX7", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX7_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_OUT("SLIMTX8", NULL, 0,
+		     ARIZONA_SLIMBUS_TX_CHANNEL_ENABLE,
+		     ARIZONA_SLIMTX8_ENA_SHIFT, 0),
+
+SND_SOC_DAPM_AIF_IN("SLIMRX1", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX1_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX2", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX2_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX3", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX3_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX4", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX4_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX5", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX5_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX6", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX6_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX7", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX7_ENA_SHIFT, 0),
+SND_SOC_DAPM_AIF_IN("SLIMRX8", NULL, 0,
+		    ARIZONA_SLIMBUS_RX_CHANNEL_ENABLE,
+		    ARIZONA_SLIMRX8_ENA_SHIFT, 0),
+
 ARIZONA_DSP_WIDGETS(DSP1, "DSP1"),
 
-SND_SOC_DAPM_VALUE_MUX("AEC Loopback", ARIZONA_DAC_AEC_CONTROL_1,
-		       ARIZONA_AEC_LOOPBACK_ENA, 0, &wm5102_aec_loopback_mux),
+SND_SOC_DAPM_MUX("AEC Loopback", ARIZONA_DAC_AEC_CONTROL_1,
+		       ARIZONA_AEC_LOOPBACK_ENA_SHIFT, 0,
+		       &wm5102_aec_loopback_mux),
 
-SND_SOC_DAPM_PGA_E("OUT1L", ARIZONA_OUTPUT_ENABLES_1,
-		   ARIZONA_OUT1L_ENA_SHIFT, 0, NULL, 0, arizona_out_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
-SND_SOC_DAPM_PGA_E("OUT1R", ARIZONA_OUTPUT_ENABLES_1,
-		   ARIZONA_OUT1R_ENA_SHIFT, 0, NULL, 0, arizona_out_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+SND_SOC_DAPM_PGA_E("OUT1L", SND_SOC_NOPM,
+		   ARIZONA_OUT1L_ENA_SHIFT, 0, NULL, 0, arizona_hp_ev,
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
+SND_SOC_DAPM_PGA_E("OUT1R", SND_SOC_NOPM,
+		   ARIZONA_OUT1R_ENA_SHIFT, 0, NULL, 0, arizona_hp_ev,
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("OUT2L", ARIZONA_OUTPUT_ENABLES_1,
 		   ARIZONA_OUT2L_ENA_SHIFT, 0, NULL, 0, arizona_out_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("OUT2R", ARIZONA_OUTPUT_ENABLES_1,
 		   ARIZONA_OUT2R_ENA_SHIFT, 0, NULL, 0, arizona_out_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("OUT3L", ARIZONA_OUTPUT_ENABLES_1,
 		   ARIZONA_OUT3L_ENA_SHIFT, 0, NULL, 0, arizona_out_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
-SND_SOC_DAPM_PGA_E("OUT4L", ARIZONA_OUTPUT_ENABLES_1,
-		   ARIZONA_OUT4L_ENA_SHIFT, 0, NULL, 0, wm5102_spk_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
-SND_SOC_DAPM_PGA_E("OUT4R", ARIZONA_OUTPUT_ENABLES_1,
-		   ARIZONA_OUT4R_ENA_SHIFT, 0, NULL, 0, wm5102_spk_ev,
-		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD |
+		   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
 SND_SOC_DAPM_PGA_E("OUT5L", ARIZONA_OUTPUT_ENABLES_1,
 		   ARIZONA_OUT5L_ENA_SHIFT, 0, NULL, 0, arizona_out_ev,
 		   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
@@ -1134,12 +1382,33 @@ ARIZONA_MIXER_WIDGETS(AIF2TX2, "AIF2TX2"),
 ARIZONA_MIXER_WIDGETS(AIF3TX1, "AIF3TX1"),
 ARIZONA_MIXER_WIDGETS(AIF3TX2, "AIF3TX2"),
 
+ARIZONA_MIXER_WIDGETS(SLIMTX1, "SLIMTX1"),
+ARIZONA_MIXER_WIDGETS(SLIMTX2, "SLIMTX2"),
+ARIZONA_MIXER_WIDGETS(SLIMTX3, "SLIMTX3"),
+ARIZONA_MIXER_WIDGETS(SLIMTX4, "SLIMTX4"),
+ARIZONA_MIXER_WIDGETS(SLIMTX5, "SLIMTX5"),
+ARIZONA_MIXER_WIDGETS(SLIMTX6, "SLIMTX6"),
+ARIZONA_MIXER_WIDGETS(SLIMTX7, "SLIMTX7"),
+ARIZONA_MIXER_WIDGETS(SLIMTX8, "SLIMTX8"),
+
 ARIZONA_MUX_WIDGETS(ASRC1L, "ASRC1L"),
 ARIZONA_MUX_WIDGETS(ASRC1R, "ASRC1R"),
 ARIZONA_MUX_WIDGETS(ASRC2L, "ASRC2L"),
 ARIZONA_MUX_WIDGETS(ASRC2R, "ASRC2R"),
 
-WM_ADSP2("DSP1", 0),
+ARIZONA_MUX_WIDGETS(ISRC1DEC1, "ISRC1DEC1"),
+ARIZONA_MUX_WIDGETS(ISRC1DEC2, "ISRC1DEC2"),
+
+ARIZONA_MUX_WIDGETS(ISRC1INT1, "ISRC1INT1"),
+ARIZONA_MUX_WIDGETS(ISRC1INT2, "ISRC1INT2"),
+
+ARIZONA_MUX_WIDGETS(ISRC2DEC1, "ISRC2DEC1"),
+ARIZONA_MUX_WIDGETS(ISRC2DEC2, "ISRC2DEC2"),
+
+ARIZONA_MUX_WIDGETS(ISRC2INT1, "ISRC2INT1"),
+ARIZONA_MUX_WIDGETS(ISRC2INT2, "ISRC2INT2"),
+
+WM_ADSP2("DSP1", 0, wm5102_adsp_power_ev),
 
 SND_SOC_DAPM_OUTPUT("HPOUT1L"),
 SND_SOC_DAPM_OUTPUT("HPOUT1R"),
@@ -1153,6 +1422,8 @@ SND_SOC_DAPM_OUTPUT("SPKOUTRN"),
 SND_SOC_DAPM_OUTPUT("SPKOUTRP"),
 SND_SOC_DAPM_OUTPUT("SPKDAT1L"),
 SND_SOC_DAPM_OUTPUT("SPKDAT1R"),
+
+SND_SOC_DAPM_OUTPUT("MICSUPP"),
 };
 
 #define ARIZONA_MIXER_INPUT_ROUTES(name)	\
@@ -1180,6 +1451,14 @@ SND_SOC_DAPM_OUTPUT("SPKDAT1R"),
 	{ name, "AIF2RX2", "AIF2RX2" }, \
 	{ name, "AIF3RX1", "AIF3RX1" }, \
 	{ name, "AIF3RX2", "AIF3RX2" }, \
+	{ name, "SLIMRX1", "SLIMRX1" }, \
+	{ name, "SLIMRX2", "SLIMRX2" }, \
+	{ name, "SLIMRX3", "SLIMRX3" }, \
+	{ name, "SLIMRX4", "SLIMRX4" }, \
+	{ name, "SLIMRX5", "SLIMRX5" }, \
+	{ name, "SLIMRX6", "SLIMRX6" }, \
+	{ name, "SLIMRX7", "SLIMRX7" }, \
+	{ name, "SLIMRX8", "SLIMRX8" }, \
 	{ name, "EQ1", "EQ1" }, \
 	{ name, "EQ2", "EQ2" }, \
 	{ name, "EQ3", "EQ3" }, \
@@ -1194,6 +1473,14 @@ SND_SOC_DAPM_OUTPUT("SPKDAT1R"),
 	{ name, "ASRC1R", "ASRC1R" }, \
 	{ name, "ASRC2L", "ASRC2L" }, \
 	{ name, "ASRC2R", "ASRC2R" }, \
+	{ name, "ISRC1DEC1", "ISRC1DEC1" }, \
+	{ name, "ISRC1DEC2", "ISRC1DEC2" }, \
+	{ name, "ISRC1INT1", "ISRC1INT1" }, \
+	{ name, "ISRC1INT2", "ISRC1INT2" }, \
+	{ name, "ISRC2DEC1", "ISRC2DEC1" }, \
+	{ name, "ISRC2DEC2", "ISRC2DEC2" }, \
+	{ name, "ISRC2INT1", "ISRC2INT1" }, \
+	{ name, "ISRC2INT2", "ISRC2INT2" }, \
 	{ name, "DSP1.1", "DSP1" }, \
 	{ name, "DSP1.2", "DSP1" }, \
 	{ name, "DSP1.3", "DSP1" }, \
@@ -1227,16 +1514,34 @@ static const struct snd_soc_dapm_route wm5102_dapm_routes[] = {
 	{ "OUT5L", NULL, "SYSCLK" },
 	{ "OUT5R", NULL, "SYSCLK" },
 
+	{ "IN1L", NULL, "SYSCLK" },
+	{ "IN1R", NULL, "SYSCLK" },
+	{ "IN2L", NULL, "SYSCLK" },
+	{ "IN2R", NULL, "SYSCLK" },
+	{ "IN3L", NULL, "SYSCLK" },
+	{ "IN3R", NULL, "SYSCLK" },
+
+	{ "ASRC1L", NULL, "SYSCLK" },
+	{ "ASRC1R", NULL, "SYSCLK" },
+	{ "ASRC2L", NULL, "SYSCLK" },
+	{ "ASRC2R", NULL, "SYSCLK" },
+
+	{ "ASRC1L", NULL, "ASYNCCLK" },
+	{ "ASRC1R", NULL, "ASYNCCLK" },
+	{ "ASRC2L", NULL, "ASYNCCLK" },
+	{ "ASRC2R", NULL, "ASYNCCLK" },
+
 	{ "MICBIAS1", NULL, "MICVDD" },
 	{ "MICBIAS2", NULL, "MICVDD" },
 	{ "MICBIAS3", NULL, "MICVDD" },
 
+	{ "Noise Generator", NULL, "SYSCLK" },
+	{ "Tone Generator 1", NULL, "SYSCLK" },
+	{ "Tone Generator 2", NULL, "SYSCLK" },
+
 	{ "Noise Generator", NULL, "NOISE" },
 	{ "Tone Generator 1", NULL, "TONE" },
 	{ "Tone Generator 2", NULL, "TONE" },
-
-	{ "Mic Mute Mixer", NULL, "Noise Mixer" },
-	{ "Mic Mute Mixer", NULL, "Mic Mixer" },
 
 	{ "AIF1 Capture", NULL, "AIF1TX1" },
 	{ "AIF1 Capture", NULL, "AIF1TX2" },
@@ -1268,13 +1573,43 @@ static const struct snd_soc_dapm_route wm5102_dapm_routes[] = {
 	{ "AIF3RX1", NULL, "AIF3 Playback" },
 	{ "AIF3RX2", NULL, "AIF3 Playback" },
 
+	{ "Slim1 Capture", NULL, "SLIMTX1" },
+	{ "Slim1 Capture", NULL, "SLIMTX2" },
+	{ "Slim1 Capture", NULL, "SLIMTX3" },
+	{ "Slim1 Capture", NULL, "SLIMTX4" },
+
+	{ "SLIMRX1", NULL, "Slim1 Playback" },
+	{ "SLIMRX2", NULL, "Slim1 Playback" },
+	{ "SLIMRX3", NULL, "Slim1 Playback" },
+	{ "SLIMRX4", NULL, "Slim1 Playback" },
+
+	{ "Slim2 Capture", NULL, "SLIMTX5" },
+	{ "Slim2 Capture", NULL, "SLIMTX6" },
+
+	{ "SLIMRX5", NULL, "Slim2 Playback" },
+	{ "SLIMRX6", NULL, "Slim2 Playback" },
+
+	{ "Slim3 Capture", NULL, "SLIMTX7" },
+	{ "Slim3 Capture", NULL, "SLIMTX8" },
+
+	{ "SLIMRX7", NULL, "Slim3 Playback" },
+	{ "SLIMRX8", NULL, "Slim3 Playback" },
+
 	{ "AIF1 Playback", NULL, "SYSCLK" },
 	{ "AIF2 Playback", NULL, "SYSCLK" },
 	{ "AIF3 Playback", NULL, "SYSCLK" },
+	{ "Slim1 Playback", NULL, "SYSCLK" },
+	{ "Slim2 Playback", NULL, "SYSCLK" },
+	{ "Slim3 Playback", NULL, "SYSCLK" },
 
 	{ "AIF1 Capture", NULL, "SYSCLK" },
 	{ "AIF2 Capture", NULL, "SYSCLK" },
 	{ "AIF3 Capture", NULL, "SYSCLK" },
+	{ "Slim1 Capture", NULL, "SYSCLK" },
+	{ "Slim2 Capture", NULL, "SYSCLK" },
+	{ "Slim3 Capture", NULL, "SYSCLK" },
+
+	{ "Audio Trace DSP", NULL, "DSP1" },
 
 	{ "IN1L PGA", NULL, "IN1L" },
 	{ "IN1R PGA", NULL, "IN1R" },
@@ -1284,11 +1619,6 @@ static const struct snd_soc_dapm_route wm5102_dapm_routes[] = {
 
 	{ "IN3L PGA", NULL, "IN3L" },
 	{ "IN3R PGA", NULL, "IN3R" },
-
-	{ "ASRC1L", NULL, "ASRC1L Input" },
-	{ "ASRC1R", NULL, "ASRC1R Input" },
-	{ "ASRC2L", NULL, "ASRC2L Input" },
-	{ "ASRC2R", NULL, "ASRC2R Input" },
 
 	ARIZONA_MIXER_ROUTES("OUT1L", "HPOUT1L"),
 	ARIZONA_MIXER_ROUTES("OUT1R", "HPOUT1R"),
@@ -1319,6 +1649,15 @@ static const struct snd_soc_dapm_route wm5102_dapm_routes[] = {
 	ARIZONA_MIXER_ROUTES("AIF3TX1", "AIF3TX1"),
 	ARIZONA_MIXER_ROUTES("AIF3TX2", "AIF3TX2"),
 
+	ARIZONA_MIXER_ROUTES("SLIMTX1", "SLIMTX1"),
+	ARIZONA_MIXER_ROUTES("SLIMTX2", "SLIMTX2"),
+	ARIZONA_MIXER_ROUTES("SLIMTX3", "SLIMTX3"),
+	ARIZONA_MIXER_ROUTES("SLIMTX4", "SLIMTX4"),
+	ARIZONA_MIXER_ROUTES("SLIMTX5", "SLIMTX5"),
+	ARIZONA_MIXER_ROUTES("SLIMTX6", "SLIMTX6"),
+	ARIZONA_MIXER_ROUTES("SLIMTX7", "SLIMTX7"),
+	ARIZONA_MIXER_ROUTES("SLIMTX8", "SLIMTX8"),
+
 	ARIZONA_MIXER_ROUTES("EQ1", "EQ1"),
 	ARIZONA_MIXER_ROUTES("EQ2", "EQ2"),
 	ARIZONA_MIXER_ROUTES("EQ3", "EQ3"),
@@ -1332,10 +1671,25 @@ static const struct snd_soc_dapm_route wm5102_dapm_routes[] = {
 	ARIZONA_MIXER_ROUTES("LHPF3", "LHPF3"),
 	ARIZONA_MIXER_ROUTES("LHPF4", "LHPF4"),
 
-	ARIZONA_MUX_ROUTES("ASRC1L"),
-	ARIZONA_MUX_ROUTES("ASRC1R"),
-	ARIZONA_MUX_ROUTES("ASRC2L"),
-	ARIZONA_MUX_ROUTES("ASRC2R"),
+	ARIZONA_MIXER_ROUTES("Mic Mute Mixer", "Noise"),
+	ARIZONA_MIXER_ROUTES("Mic Mute Mixer", "Mic"),
+
+	ARIZONA_MUX_ROUTES("ASRC1L", "ASRC1L"),
+	ARIZONA_MUX_ROUTES("ASRC1R", "ASRC1R"),
+	ARIZONA_MUX_ROUTES("ASRC2L", "ASRC2L"),
+	ARIZONA_MUX_ROUTES("ASRC2R", "ASRC2R"),
+
+	ARIZONA_MUX_ROUTES("ISRC1INT1", "ISRC1INT1"),
+	ARIZONA_MUX_ROUTES("ISRC1INT2", "ISRC1INT2"),
+
+	ARIZONA_MUX_ROUTES("ISRC1DEC1", "ISRC1DEC1"),
+	ARIZONA_MUX_ROUTES("ISRC1DEC2", "ISRC1DEC2"),
+
+	ARIZONA_MUX_ROUTES("ISRC2INT1", "ISRC2INT1"),
+	ARIZONA_MUX_ROUTES("ISRC2INT2", "ISRC2INT2"),
+
+	ARIZONA_MUX_ROUTES("ISRC2DEC1", "ISRC2DEC1"),
+	ARIZONA_MUX_ROUTES("ISRC2DEC2", "ISRC2DEC2"),
 
 	ARIZONA_DSP_ROUTES("DSP1"),
 
@@ -1365,6 +1719,12 @@ static const struct snd_soc_dapm_route wm5102_dapm_routes[] = {
 	{ "AEC Loopback", "SPKDAT1R", "OUT5R" },
 	{ "SPKDAT1L", NULL, "OUT5L" },
 	{ "SPKDAT1R", NULL, "OUT5R" },
+
+	{ "MICSUPP", NULL, "SYSCLK" },
+
+	{ "DRC1 Signal Activity", NULL, "SYSCLK" },
+	{ "DRC1 Signal Activity", NULL, "DRC1L" },
+	{ "DRC1 Signal Activity", NULL, "DRC1R" },
 };
 
 static int wm5102_set_fll(struct snd_soc_codec *codec, int fll_id, int source,
@@ -1377,12 +1737,18 @@ static int wm5102_set_fll(struct snd_soc_codec *codec, int fll_id, int source,
 		return arizona_set_fll(&wm5102->fll[0], source, Fref, Fout);
 	case WM5102_FLL2:
 		return arizona_set_fll(&wm5102->fll[1], source, Fref, Fout);
+	case WM5102_FLL1_REFCLK:
+		return arizona_set_fll_refclk(&wm5102->fll[0], source, Fref,
+					      Fout);
+	case WM5102_FLL2_REFCLK:
+		return arizona_set_fll_refclk(&wm5102->fll[1], source, Fref,
+					      Fout);
 	default:
 		return -EINVAL;
 	}
 }
 
-#define WM5102_RATES SNDRV_PCM_RATE_8000_192000
+#define WM5102_RATES SNDRV_PCM_RATE_KNOT
 
 #define WM5102_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE |\
 			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
@@ -1408,6 +1774,7 @@ static struct snd_soc_dai_driver wm5102_dai[] = {
 		 },
 		.ops = &arizona_dai_ops,
 		.symmetric_rates = 1,
+		.symmetric_samplebits = 1,
 	},
 	{
 		.name = "wm5102-aif2",
@@ -1429,6 +1796,7 @@ static struct snd_soc_dai_driver wm5102_dai[] = {
 		 },
 		.ops = &arizona_dai_ops,
 		.symmetric_rates = 1,
+		.symmetric_samplebits = 1,
 	},
 	{
 		.name = "wm5102-aif3",
@@ -1450,32 +1818,162 @@ static struct snd_soc_dai_driver wm5102_dai[] = {
 		 },
 		.ops = &arizona_dai_ops,
 		.symmetric_rates = 1,
+		.symmetric_samplebits = 1,
+	},
+	{
+		.name = "wm5102-slim1",
+		.id = 4,
+		.playback = {
+			.stream_name = "Slim1 Playback",
+			.channels_min = 1,
+			.channels_max = 4,
+			.rates = WM5102_RATES,
+			.formats = WM5102_FORMATS,
+		},
+		.capture = {
+			 .stream_name = "Slim1 Capture",
+			 .channels_min = 1,
+			 .channels_max = 4,
+			 .rates = WM5102_RATES,
+			 .formats = WM5102_FORMATS,
+		 },
+		.ops = &arizona_simple_dai_ops,
+	},
+	{
+		.name = "wm5102-slim2",
+		.id = 5,
+		.playback = {
+			.stream_name = "Slim2 Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = WM5102_RATES,
+			.formats = WM5102_FORMATS,
+		},
+		.capture = {
+			 .stream_name = "Slim2 Capture",
+			 .channels_min = 1,
+			 .channels_max = 2,
+			 .rates = WM5102_RATES,
+			 .formats = WM5102_FORMATS,
+		 },
+		.ops = &arizona_simple_dai_ops,
+	},
+	{
+		.name = "wm5102-slim3",
+		.id = 6,
+		.playback = {
+			.stream_name = "Slim3 Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = WM5102_RATES,
+			.formats = WM5102_FORMATS,
+		},
+		.capture = {
+			 .stream_name = "Slim3 Capture",
+			 .channels_min = 1,
+			 .channels_max = 2,
+			 .rates = WM5102_RATES,
+			 .formats = WM5102_FORMATS,
+		 },
+		.ops = &arizona_simple_dai_ops,
+	},
+	{
+		.name = "wm5102-cpu-trace",
+		.capture = {
+			.stream_name = "Audio Trace CPU",
+			.channels_min = 1,
+			.channels_max = 4,
+			.rates = WM5102_RATES,
+			.formats = WM5102_FORMATS,
+		},
+		.compress_new = snd_soc_new_compress,
+	},
+	{
+		.name = "wm5102-dsp-trace",
+		.capture = {
+			.stream_name = "Audio Trace DSP",
+			.channels_min = 1,
+			.channels_max = 4,
+			.rates = WM5102_RATES,
+			.formats = WM5102_FORMATS,
+		},
 	},
 };
 
-static int wm5102_codec_probe(struct snd_soc_codec *codec)
+static int wm5102_open(struct snd_compr_stream *stream)
 {
-	struct wm5102_priv *priv = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_pcm_runtime *rtd = stream->private_data;
+	struct wm5102_priv *priv = snd_soc_codec_get_drvdata(rtd->codec);
+
+	return wm_adsp_compr_open(&priv->core.adsp[0], stream);
+}
+
+static irqreturn_t wm5102_adsp2_irq(int irq, void *data)
+{
+	struct wm5102_priv *priv = data;
+	struct arizona *arizona = priv->core.arizona;
 	int ret;
 
-	codec->control_data = priv->core.arizona->regmap;
+	ret = wm_adsp_compr_handle_irq(&priv->core.adsp[0]);
+	if (ret == -ENODEV) {
+		dev_err(arizona->dev, "Spurious compressed data IRQ\n");
+		return IRQ_NONE;
+	}
 
-	ret = snd_soc_codec_set_cache_io(codec, 32, 16, SND_SOC_REGMAP);
-	if (ret != 0)
+	return IRQ_HANDLED;
+}
+
+static int wm5102_codec_probe(struct snd_soc_codec *codec)
+{
+	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
+	struct wm5102_priv *priv = snd_soc_codec_get_drvdata(codec);
+	struct arizona *arizona = priv->core.arizona;
+	int ret;
+
+	ret = arizona_request_irq(arizona, ARIZONA_IRQ_DSP_IRQ1,
+				  "ADSP2 Compressed IRQ", wm5102_adsp2_irq,
+				  priv);
+	if (ret != 0) {
+		dev_err(codec->dev, "Failed to request DSP IRQ: %d\n", ret);
+		return ret;
+	}
+
+	ret = wm_adsp2_codec_probe(&priv->core.adsp[0], codec);
+	if (ret)
 		return ret;
 
-	snd_soc_dapm_disable_pin(&codec->dapm, "HAPTICS");
+	ret = snd_soc_add_codec_controls(codec,
+					 arizona_adsp2_rate_controls, 1);
+	if (ret)
+		goto err_adsp2_codec_probe;
 
-	priv->core.arizona->dapm = &codec->dapm;
+	arizona_init_spk(codec);
+	arizona_init_gpio(codec);
+
+	snd_soc_dapm_disable_pin(dapm, "HAPTICS");
+
+	priv->core.arizona->dapm = dapm;
 
 	return 0;
+
+err_adsp2_codec_probe:
+	wm_adsp2_codec_remove(&priv->core.adsp[0], codec);
+
+	return ret;
 }
 
 static int wm5102_codec_remove(struct snd_soc_codec *codec)
 {
 	struct wm5102_priv *priv = snd_soc_codec_get_drvdata(codec);
+	struct arizona *arizona = priv->core.arizona;
+
+	wm_adsp2_codec_remove(&priv->core.adsp[0], codec);
 
 	priv->core.arizona->dapm = NULL;
+
+	arizona_free_irq(arizona, ARIZONA_IRQ_DSP_IRQ1, priv);
+
+	arizona_free_spk(codec);
 
 	return 0;
 }
@@ -1483,40 +1981,56 @@ static int wm5102_codec_remove(struct snd_soc_codec *codec)
 #define WM5102_DIG_VU 0x0200
 
 static unsigned int wm5102_digital_vu[] = {
-	ARIZONA_ADC_DIGITAL_VOLUME_1L,
-	ARIZONA_ADC_DIGITAL_VOLUME_1R,
-	ARIZONA_ADC_DIGITAL_VOLUME_2L,
-	ARIZONA_ADC_DIGITAL_VOLUME_2R,
-	ARIZONA_ADC_DIGITAL_VOLUME_3L,
-	ARIZONA_ADC_DIGITAL_VOLUME_3R,
-
 	ARIZONA_DAC_DIGITAL_VOLUME_1L,
 	ARIZONA_DAC_DIGITAL_VOLUME_1R,
 	ARIZONA_DAC_DIGITAL_VOLUME_2L,
 	ARIZONA_DAC_DIGITAL_VOLUME_2R,
 	ARIZONA_DAC_DIGITAL_VOLUME_3L,
-	ARIZONA_DAC_DIGITAL_VOLUME_3R,
 	ARIZONA_DAC_DIGITAL_VOLUME_4L,
 	ARIZONA_DAC_DIGITAL_VOLUME_4R,
 	ARIZONA_DAC_DIGITAL_VOLUME_5L,
 	ARIZONA_DAC_DIGITAL_VOLUME_5R,
 };
 
-static struct snd_soc_codec_driver soc_codec_dev_wm5102 = {
+static struct regmap *wm5102_get_regmap(struct device *dev)
+{
+	struct wm5102_priv *priv = dev_get_drvdata(dev);
+
+	return priv->core.arizona->regmap;
+}
+
+static const struct snd_soc_codec_driver soc_codec_dev_wm5102 = {
 	.probe = wm5102_codec_probe,
 	.remove = wm5102_codec_remove,
+	.get_regmap = wm5102_get_regmap,
 
 	.idle_bias_off = true,
 
 	.set_sysclk = arizona_set_sysclk,
 	.set_pll = wm5102_set_fll,
 
-	.controls = wm5102_snd_controls,
-	.num_controls = ARRAY_SIZE(wm5102_snd_controls),
-	.dapm_widgets = wm5102_dapm_widgets,
-	.num_dapm_widgets = ARRAY_SIZE(wm5102_dapm_widgets),
-	.dapm_routes = wm5102_dapm_routes,
-	.num_dapm_routes = ARRAY_SIZE(wm5102_dapm_routes),
+	.component_driver = {
+		.controls		= wm5102_snd_controls,
+		.num_controls		= ARRAY_SIZE(wm5102_snd_controls),
+		.dapm_widgets		= wm5102_dapm_widgets,
+		.num_dapm_widgets	= ARRAY_SIZE(wm5102_dapm_widgets),
+		.dapm_routes		= wm5102_dapm_routes,
+		.num_dapm_routes	= ARRAY_SIZE(wm5102_dapm_routes),
+	},
+};
+
+static struct snd_compr_ops wm5102_compr_ops = {
+	.open = wm5102_open,
+	.free = wm_adsp_compr_free,
+	.set_params = wm_adsp_compr_set_params,
+	.get_caps = wm_adsp_compr_get_caps,
+	.trigger = wm_adsp_compr_trigger,
+	.pointer = wm_adsp_compr_pointer,
+	.copy = wm_adsp_compr_copy,
+};
+
+static struct snd_soc_platform_driver wm5102_compr_platform = {
+	.compr_ops = &wm5102_compr_ops,
 };
 
 static int wm5102_probe(struct platform_device *pdev)
@@ -1531,7 +2045,12 @@ static int wm5102_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, wm5102);
 
+	mutex_init(&arizona->dac_comp_lock);
+
 	wm5102->core.arizona = arizona;
+	wm5102->core.num_inputs = 6;
+
+	arizona_init_dvfs(&wm5102->core);
 
 	wm5102->core.adsp[0].part = "wm5102";
 	wm5102->core.adsp[0].num = 1;
@@ -1542,7 +2061,7 @@ static int wm5102_probe(struct platform_device *pdev)
 	wm5102->core.adsp[0].mem = wm5102_dsp1_regions;
 	wm5102->core.adsp[0].num_mems = ARRAY_SIZE(wm5102_dsp1_regions);
 
-	ret = wm_adsp2_init(&wm5102->core.adsp[0], true);
+	ret = wm_adsp2_init(&wm5102->core.adsp[0]);
 	if (ret != 0)
 		return ret;
 
@@ -1556,6 +2075,12 @@ static int wm5102_probe(struct platform_device *pdev)
 			 ARIZONA_IRQ_FLL2_LOCK, ARIZONA_IRQ_FLL2_CLOCK_OK,
 			 &wm5102->fll[1]);
 
+	/* SR2 fixed at 8kHz, SR3 fixed at 16kHz */
+	regmap_update_bits(arizona->regmap, ARIZONA_SAMPLE_RATE_2,
+			   ARIZONA_SAMPLE_RATE_2_MASK, 0x11);
+	regmap_update_bits(arizona->regmap, ARIZONA_SAMPLE_RATE_3,
+			   ARIZONA_SAMPLE_RATE_3_MASK, 0x12);
+
 	for (i = 0; i < ARRAY_SIZE(wm5102_dai); i++)
 		arizona_init_dai(&wm5102->core, i);
 
@@ -1567,14 +2092,31 @@ static int wm5102_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 	pm_runtime_idle(&pdev->dev);
 
-	return snd_soc_register_codec(&pdev->dev, &soc_codec_dev_wm5102,
+	ret = snd_soc_register_platform(&pdev->dev, &wm5102_compr_platform);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to register platform: %d\n", ret);
+		return ret;
+	}
+
+	ret = snd_soc_register_codec(&pdev->dev, &soc_codec_dev_wm5102,
 				      wm5102_dai, ARRAY_SIZE(wm5102_dai));
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to register codec: %d\n", ret);
+		snd_soc_unregister_platform(&pdev->dev);
+	}
+
+	return ret;
 }
 
 static int wm5102_remove(struct platform_device *pdev)
 {
+	struct wm5102_priv *wm5102 = platform_get_drvdata(pdev);
+
+	snd_soc_unregister_platform(&pdev->dev);
 	snd_soc_unregister_codec(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
+
+	wm_adsp2_remove(&wm5102->core.adsp[0]);
 
 	return 0;
 }
@@ -1582,7 +2124,6 @@ static int wm5102_remove(struct platform_device *pdev)
 static struct platform_driver wm5102_codec_driver = {
 	.driver = {
 		.name = "wm5102-codec",
-		.owner = THIS_MODULE,
 	},
 	.probe = wm5102_probe,
 	.remove = wm5102_remove,

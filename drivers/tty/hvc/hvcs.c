@@ -600,7 +600,7 @@ static int hvcs_io(struct hvcs_struct *hvcsd)
 
 	hvcs_try_write(hvcsd);
 
-	if (!tty || test_bit(TTY_THROTTLED, &tty->flags)) {
+	if (!tty || tty_throttled(tty)) {
 		hvcsd->todo_mask &= ~(HVCS_READ_MASK);
 		goto bail;
 	} else if (!(hvcsd->todo_mask & (HVCS_READ_MASK)))
@@ -609,11 +609,11 @@ static int hvcs_io(struct hvcs_struct *hvcsd)
 	/* remove the read masks */
 	hvcsd->todo_mask &= ~(HVCS_READ_MASK);
 
-	if (tty_buffer_request_room(tty, HVCS_BUFF_LEN) >= HVCS_BUFF_LEN) {
+	if (tty_buffer_request_room(&hvcsd->port, HVCS_BUFF_LEN) >= HVCS_BUFF_LEN) {
 		got = hvc_get_chars(unit_address,
 				&buf[0],
 				HVCS_BUFF_LEN);
-		tty_insert_flip_string(tty, buf, got);
+		tty_insert_flip_string(&hvcsd->port, buf, got);
 	}
 
 	/* Give the TTY time to process the data we just sent. */
@@ -623,7 +623,7 @@ static int hvcs_io(struct hvcs_struct *hvcsd)
 	spin_unlock_irqrestore(&hvcsd->lock, flags);
 	/* This is synch because tty->low_latency == 1 */
 	if(got)
-		tty_flip_buffer_push(tty);
+		tty_flip_buffer_push(&hvcsd->port);
 
 	if (!got) {
 		/* Do this _after_ the flip_buffer_push */
@@ -881,17 +881,12 @@ static struct vio_driver hvcs_vio_driver = {
 /* Only called from hvcs_get_pi please */
 static void hvcs_set_pi(struct hvcs_partner_info *pi, struct hvcs_struct *hvcsd)
 {
-	int clclength;
-
 	hvcsd->p_unit_address = pi->unit_address;
 	hvcsd->p_partition_ID  = pi->partition_ID;
-	clclength = strlen(&pi->location_code[0]);
-	if (clclength > HVCS_CLC_LENGTH)
-		clclength = HVCS_CLC_LENGTH;
 
 	/* copy the null-term char too */
-	strncpy(&hvcsd->p_location_code[0],
-			&pi->location_code[0], clclength + 1);
+	strlcpy(&hvcsd->p_location_code[0],
+			&pi->location_code[0], sizeof(hvcsd->p_location_code));
 }
 
 /*
@@ -1049,8 +1044,8 @@ static int hvcs_enable_device(struct hvcs_struct *hvcsd, uint32_t unit_address,
 	 * It is possible that the vty-server was removed between the time that
 	 * the conn was registered and now.
 	 */
-	if (!(rc = request_irq(irq, &hvcs_handle_interrupt,
-				0, "ibmhvcs", hvcsd))) {
+	rc = request_irq(irq, &hvcs_handle_interrupt, 0, "ibmhvcs", hvcsd);
+	if (!rc) {
 		/*
 		 * It is possible the vty-server was removed after the irq was
 		 * requested but before we have time to enable interrupts.
@@ -1235,7 +1230,7 @@ static void hvcs_close(struct tty_struct *tty, struct file *filp)
 		irq = hvcsd->vdev->irq;
 		spin_unlock_irqrestore(&hvcsd->lock, flags);
 
-		tty_wait_until_sent_from_close(tty, HVCS_CLOSE_WAIT);
+		tty_wait_until_sent(tty, HVCS_CLOSE_WAIT);
 
 		/*
 		 * This line is important because it tells hvcs_open that this
@@ -1580,7 +1575,7 @@ static int __init hvcs_module_init(void)
 	 */
 	rc = driver_create_file(&(hvcs_vio_driver.driver), &driver_attr_rescan);
 	if (rc)
-		pr_warning(KERN_ERR "HVCS: Failed to create rescan file (err %d)\n", rc);
+		pr_warning("HVCS: Failed to create rescan file (err %d)\n", rc);
 
 	return 0;
 }

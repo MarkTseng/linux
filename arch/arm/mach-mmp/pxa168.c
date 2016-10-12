@@ -13,25 +13,25 @@
 #include <linux/list.h>
 #include <linux/io.h>
 #include <linux/clk.h>
+#include <linux/clk/mmp.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/mv_usb.h>
+#include <linux/dma-mapping.h>
 
 #include <asm/mach/time.h>
 #include <asm/system_misc.h>
-#include <mach/cputype.h>
-#include <mach/addr-map.h>
-#include <mach/regs-apbc.h>
-#include <mach/regs-apmu.h>
-#include <mach/irqs.h>
-#include <mach/dma.h>
-#include <mach/devices.h>
-#include <mach/mfp.h>
-#include <linux/dma-mapping.h>
-#include <mach/pxa168.h>
-#include <mach/regs-usb.h>
 
-#include "common.h"
+#include "addr-map.h"
 #include "clock.h"
+#include "common.h"
+#include "cputype.h"
+#include "devices.h"
+#include "irqs.h"
+#include "mfp.h"
+#include "pxa168.h"
+#include "regs-apbc.h"
+#include "regs-apmu.h"
+#include "regs-usb.h"
 
 #define MFPR_VIRT_BASE	(APB_VIRT_BASE + 0x1e000)
 
@@ -55,8 +55,9 @@ static int __init pxa168_init(void)
 	if (cpu_is_pxa168()) {
 		mfp_init_base(MFPR_VIRT_BASE);
 		mfp_init_addr(pxa168_mfp_addr_map);
-		pxa_init_dma(IRQ_PXA168_DMA_INT0, 32);
-		pxa168_clk_init();
+		pxa168_clk_init(APB_PHYS_BASE + 0x50000,
+				AXI_PHYS_BASE + 0x82800,
+				APB_PHYS_BASE + 0x15000);
 	}
 
 	return 0;
@@ -67,7 +68,7 @@ postcore_initcall(pxa168_init);
 #define TIMER_CLK_RST	(APBC_APBCLK | APBC_FNCLK | APBC_FNCLKSEL(3))
 #define APBC_TIMERS	APBC_REG(0x34)
 
-static void __init pxa168_timer_init(void)
+void __init pxa168_timer_init(void)
 {
 	/* this is early, we have to initialize the CCU registers by
 	 * ourselves instead of using clk_* API. Clock rate is defined
@@ -80,10 +81,6 @@ static void __init pxa168_timer_init(void)
 
 	timer_init(IRQ_PXA168_TIMER1);
 }
-
-struct sys_timer pxa168_timer = {
-	.init	= pxa168_timer_init,
-};
 
 void pxa168_clear_keypad_wakeup(void)
 {
@@ -129,7 +126,7 @@ struct resource pxa168_resource_gpio[] = {
 };
 
 struct platform_device pxa168_device_gpio = {
-	.name		= "pxa-gpio",
+	.name		= "mmp-gpio",
 	.id		= -1,
 	.num_resources	= ARRAY_SIZE(pxa168_resource_gpio),
 	.resource	= pxa168_resource_gpio,
@@ -176,7 +173,7 @@ int __init pxa168_add_usb_host(struct mv_usb_platform_data *pdata)
 	return platform_device_register(&pxa168_device_usb_host);
 }
 
-void pxa168_restart(char mode, const char *cmd)
+void pxa168_restart(enum reboot_mode mode, const char *cmd)
 {
 	soft_restart(0xffff0000);
 }
